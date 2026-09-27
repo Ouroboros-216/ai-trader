@@ -147,6 +147,25 @@ def test_openai_responses_adapter_is_stateless_and_records_usage(agent, monkeypa
     assert json.loads(agent.store.db.execute("SELECT usage FROM calls").fetchone()[0])["input_tokens"] == 12
 
 
+def test_openai_strategy_waits_longer_and_cools_down_after_timeout(agent, monkeypatch):
+    monkeypatch.setenv("FAKE_OPENAI_KEY", "unit-test-openai-secret")
+    cfg = {"kind": "openai", "enabled": True, "model": "gpt-test", "api_key_env": "FAKE_OPENAI_KEY",
+           "timeout_seconds": 30, "max_calls_per_day": 10, "min_interval_seconds": 0, "max_output_tokens": 1000}
+    timeouts = []
+    def transport(url, body, headers, timeout):
+        timeouts.append(timeout)
+        raise TimeoutError("network timed out")
+    client = OpenAI(cfg, agent.store, transport)
+    with pytest.raises(ValueError, match="仍可能已計入 token"):
+        client.call("strategy", {"auto_mode": True})
+    assert timeouts == [120]
+    assert agent.store.get("provider_transient_backoff_until:gpt-test") > time.time()
+    with pytest.raises(ValueError, match="等待"):
+        client.call("strategy", {"auto_mode": True})
+    assert timeouts == [120]
+    assert agent.store.db.execute("SELECT COUNT(*) FROM calls").fetchone()[0] == 1
+
+
 @pytest.mark.parametrize("raw,status", [
     ({"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}, "max_tokens"),
     ({"status": "completed", "output": [{"type": "message", "content": [{"type": "refusal", "refusal": "no"}]}]}, "blocked"),

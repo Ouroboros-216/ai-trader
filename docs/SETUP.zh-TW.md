@@ -2,7 +2,7 @@
 
 ## 最快設定方式：直接用視窗
 
-解壓縮新版 `AITrader-v0.8.11.zip`，進入其中的 `ai-trader` 資料夾，**雙擊 `開啟設定.cmd`**。第一次會自動安裝本專案的獨立 Python 環境（不下載套件）；設定視窗開啟後 CMD 會關閉。在視窗填帳號、完整伺服器名稱，選「模擬／實盤」，再選 Gemini 或 OpenAI（GPT），填該供應商的模型 ID／API key、飛機 bot token。按「測試 Gemini」或「測試 OpenAI（GPT）」，向自己的 bot 傳 `/start` 後按「讀取飛機 ID」，從清單選自己的 ID，再按「儲存設定」。通過測試的連線會自動設為 enabled，不需手改 `true`。
+解壓縮新版 `AITrader-v0.8.12.zip`，進入其中的 `ai-trader` 資料夾，**雙擊 `開啟設定.cmd`**。第一次會自動安裝本專案的獨立 Python 環境（不下載套件）；設定視窗開啟後 CMD 會關閉。在視窗填帳號、完整伺服器名稱，選「模擬／實盤」，再選 Gemini 或 OpenAI（GPT），填該供應商的模型 ID／API key、飛機 bot token。按「測試 Gemini」或「測試 OpenAI（GPT）」，向自己的 bot 傳 `/start` 後按「讀取飛機 ID」，從清單選自己的 ID，再按「儲存設定」。通過測試的連線會自動設為 enabled，不需手改 `true`。
 
 金鑰不寫進 `local.json`；視窗會用 Windows 目前使用者的 DPAPI 加密存入 `config/secrets.bin`。這個檔案不在 ZIP 裡，也無法在另一個 Windows 使用者帳戶直接解密。若原本已填好 `local.json`，新版壓縮包不會覆蓋它。
 
@@ -77,6 +77,8 @@ Set-Location 'C:\Users\azsxd\Documents\ChatGPT\AI操盤\ai-trader'
 v0.8.10 把 OpenAI `input` 從單一 JSON 字串改成官方 Responses API 的明確使用者訊息格式（`input_text`）。這是針對某些服務回報 `參數=input` 的相容修正。若按設定視窗「測試 OpenAI（GPT）」時仍是 400，視窗會顯示已遮蔽金鑰、截短的伺服器原因，方便辨認；一般交易分析仍不會把原始錯誤傳到飛機或寫進交易紀錄。分享畫面前仍請確認沒有露出 API key 欄位。
 
 OpenAI v0.8.11 修正 JSON 模式的請求：`input` 訊息明確包含 `JSON` 字樣，符合 API 的格式驗證。
+
+OpenAI v0.8.12 讓「自動模式」策略草案最多等待 120 秒（`strategy_timeout_seconds`，可設 30–300 秒）；測試連線與持倉決策仍使用原本的 `timeout_seconds`。逾時不套用結果，也不自動重送；系統會暫停相同模型的新呼叫約 2 分鐘。請注意：請求可能已到達 API 並消耗 token，即使本機沒有取得可用回覆。用量以 OpenAI 平台顯示為準。
 
 ## 3. 建立 Telegram bot
 

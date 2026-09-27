@@ -232,8 +232,12 @@ class OpenAI:
                     "max_output_tokens": cfg["max_output_tokens"], "store": False}
             endpoint = "https://api.openai.com/v1/responses"
             headers = {"Authorization": "Bearer " + key}
+            # A strategy card is a longer response than a connectivity check or
+            # a live decision. Give it time to finish without making a second
+            # potentially billable request after a short socket timeout.
+            timeout = cfg.get("strategy_timeout_seconds", 120) if kind == "strategy" else cfg["timeout_seconds"]
             try:
-                raw = self.transport(endpoint, body, headers, cfg["timeout_seconds"])
+                raw = self.transport(endpoint, body, headers, timeout)
             except urllib.error.HTTPError as api_error:
                 http_fields = openai_error_fields(api_error, self.diagnostic, key)
                 if api_error.code != 400 or not http_fields[0].startswith("text.format"):
@@ -242,7 +246,7 @@ class OpenAI:
                 # decision validators still fail closed if plain text is unsuitable.
                 body.pop("text")
                 http_fields = ("", "", "")
-                raw = self.transport(endpoint, body, headers, cfg["timeout_seconds"])
+                raw = self.transport(endpoint, body, headers, timeout)
             if not isinstance(raw, dict):
                 raise ProviderResponseError("invalid_response", "OpenAI 回答格式不符；本次未採用。")
             if raw.get("status") != "completed":
@@ -306,7 +310,8 @@ class OpenAI:
             elif isinstance(exc, ProviderResponseError):
                 error, message = exc.status, str(exc)
             elif isinstance(exc, TimeoutError):
-                message = "OpenAI 回應逾時；本次未採用。"
+                self.quota_store.set("provider_transient_backoff_until:" + cfg["model"], time.time()+120)
+                message = "OpenAI 回應逾時；本次未採用。API 端仍可能已計入 token；請等約 2 分鐘再試。"
             with self.quota_store.db:
                 self.quota_store.db.execute("UPDATE calls SET status=?,latency=? WHERE id=?", (error, time.time()-now, call_id))
             raise ValueError(message) from None

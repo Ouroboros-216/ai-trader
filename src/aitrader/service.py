@@ -48,6 +48,8 @@ def load_config(path):
     number(p["max_calls_per_day"], 1, 10000)
     number(p["min_interval_seconds"], 1, 3600)
     number(p["timeout_seconds"], 1, 60)
+    if p["kind"] == "openai":
+        number(p.get("strategy_timeout_seconds", 120), 30, 300)
     number(p["max_output_tokens"], 128, 16000)
     tg = cfg["telegram"]
     if tg["enabled"] and (not isinstance(tg["user_id"], int) or tg["user_id"] <= 0 or tg["chat_id"] != tg["user_id"]):
