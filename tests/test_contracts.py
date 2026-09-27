@@ -19,10 +19,31 @@ def test_bad_decisions_rejected(policy, snapshot, decision, change):
         DecisionProposal.parse(decision | change, StrategyPolicy.parse(policy, 1), snapshot)
 
 
-@pytest.mark.parametrize("field,value", [("risk_pct", 10), ("risk_pct", 0), ("total_risk_pct", 5), ("daily_loss_pct", 4), ("drawdown_pct", 20), ("risk_pct", math.inf)])
+@pytest.mark.parametrize("field,value", [("risk_pct", 101), ("risk_pct", 0), ("total_risk_pct", 101), ("daily_loss_pct", 101), ("drawdown_pct", 101), ("risk_pct", math.inf)])
 def test_policy_hard_limits(policy, field, value):
     with pytest.raises(ValueError):
         StrategyPolicy.parse(policy | {field: value}, 1)
+
+
+def test_user_selected_percentages_above_initial_defaults_are_valid(policy):
+    selected = policy | {"risk_pct": 1, "total_risk_pct": 3, "daily_loss_pct": 4, "drawdown_pct": 10}
+    assert StrategyPolicy.parse(selected, 2).to_dict()["risk_pct"] == 1
+    with pytest.raises(ValueError):
+        StrategyPolicy.parse(selected | {"total_risk_pct": 0.5}, 2)
+
+
+def test_cash_and_fixed_lot_modes_are_exclusive(policy):
+    assert StrategyPolicy.parse(policy | {"risk_mode": "cash", "risk_amount": 10.0}, 2).risk_amount == 10.0
+    assert StrategyPolicy.parse(policy | {"risk_mode": "fixed_lots", "fixed_lots": 0.1}, 2).fixed_lots == 0.1
+    assert StrategyPolicy.parse(policy | {"risk_mode": "cash", "risk_amount": 10.0,
+                                   "total_risk_pct": 0.1}, 2).total_risk_pct == 0.1
+    for invalid in ({"risk_mode": "cash", "risk_amount": 0},
+                    {"risk_mode": "fixed_lots", "fixed_lots": 0},
+                    {"risk_mode": "percent", "risk_amount": 10},
+                    {"risk_mode": "cash", "risk_amount": 10, "fixed_lots": 0.1},
+                    {"risk_mode": "unknown"}):
+        with pytest.raises(ValueError):
+            StrategyPolicy.parse(policy | invalid, 2)
 
 
 @pytest.mark.parametrize("change", [{"account": "other"}, {"server": "real"}, {"demo": False}, {"magic": 3}, {"time": 1}, {"equity": math.nan}])

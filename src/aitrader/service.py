@@ -14,7 +14,7 @@ from .provider import ADAPTERS, build_provider
 from .storage import Store, dumps
 from .symbols import ambiguous_choice, catalog, relevant
 
-REQUIRED_EA_VERSION = "1.010"
+REQUIRED_EA_VERSION = "1.011"
 
 
 def load_config(path):
@@ -77,6 +77,31 @@ class Agent:
     def snapshot(self):
         return MarketSnapshot.parse(self.bridge.json("snapshot.json"), self.cfg["account"], self.cfg["server"], self.cfg["magic"], time.time(), self.cfg["snapshot_max_age_seconds"], self.cfg.get("account_mode", "demo")).data
 
+    @staticmethod
+    def market_issues(snapshot, policy):
+        issues = []
+        for symbol in policy.symbols:
+            market = snapshot["symbols"].get(symbol)
+            if not isinstance(market, dict):
+                issues.append(symbol + " 未出現在 EA 行情快照；請在市場報價顯示該商品")
+                continue
+            if market.get("ready") is True:
+                continue
+            clues = []
+            commission = market.get("commission_round_turn")
+            if not isinstance(commission, (int, float)) or commission < 0:
+                clues.append("佣金未知")
+            bid, ask = market.get("bid"), market.get("ask")
+            if not isinstance(bid, (int, float)) or not isinstance(ask, (int, float)) or bid <= 0 or ask <= bid:
+                clues.append("買賣報價無效")
+            bars = market.get("bars")
+            if isinstance(bars, dict):
+                counts = {tf: len(bars.get(tf) or []) for tf in ("M5", "M15", "H1", "H4")}
+                clues.append("已完成 K 棒 " + "、".join(tf + " " + str(count) + " 根" for tf, count in counts.items()))
+            clues.append("EA 尚未確認報價新鮮且所需 K 棒齊全")
+            issues.append(symbol + " 未就緒（" + "；".join(clues) + "）")
+        return issues
+
     def execution_context(self):
         """Observed broker-call timing and failures for this account only."""
         by_symbol = {}
@@ -130,16 +155,22 @@ class Agent:
                   "symbols": "商品", "timeframes": "週期", "entry": "進場條件",
                   "invalidation": "失效條件", "management": "持倉管理", "definitions": "術語定義",
                   "risk_pct": "單筆風險", "total_risk_pct": "總持倉風險",
-                  "daily_loss_pct": "每日損失上限", "drawdown_pct": "總回撤上限"}
+                  "daily_loss_pct": "每日損失上限", "drawdown_pct": "總回撤上限",
+                  "risk_mode": "單筆計算方式", "risk_amount": "單筆停損金額", "fixed_lots": "固定手數"}
         changed = [labels[k] for k, v in policy.to_dict().items() if k != "version" and before.get(k) != v]
         direction = {"BUY": "只做多", "SELL": "只做空", "BOTH": "多空皆可"}[policy.direction]
         def paragraph(value):
             return re.sub(r"。(?=\S)", "。\n", value.strip())
+        single = ("單筆 " + str(policy.risk_pct) + "%" if policy.risk_mode == "percent" else
+                  "每筆停損最多 " + str(policy.risk_amount) + " 帳戶幣別" if policy.risk_mode == "cash" else
+                  "每筆固定 " + str(policy.fixed_lots) + " 手")
         lines = ["策略草案｜" + policy.title, "版本 " + str(policy.version) + "；尚未套用，也不會直接交易。",
                  "商品：" + "、".join(policy.symbols), "方向：" + direction,
                  "分析週期：" + "、".join(policy.timeframes),
-                 "風險：單筆 " + str(policy.risk_pct) + "%／總持倉 " + str(policy.total_risk_pct) +
+                 "風險：" + single + "／總持倉 " + str(policy.total_risk_pct) +
                  "%／每日損失 " + str(policy.daily_loss_pct) + "%／總回撤 " + str(policy.drawdown_pct) + "%"]
+        if policy.risk_mode == "fixed_lots":
+            lines.append("固定手數若超出商品規格、總風險或可用保證金，EA 會拒絕該筆交易。")
         for label, value in (("適用範圍", policy.instructions), ("進場條件", policy.entry),
                              ("何時失效", policy.invalidation), ("進場後如何管理", policy.management),
                              ("術語如何定義", policy.definitions)):
@@ -156,11 +187,63 @@ class Agent:
             raise ValueError("目前沒有待確認的策略草案；請先傳『自動模式』或『策略 你的規則』")
         if not detail.strip():
             raise ValueError("請在『修改』後說明要改的策略條件")
+        risk = self.risk_request(detail.strip())
+        if risk:
+            return self.risk_draft(*risk, detail.strip())
         return self.draft("以待確認草案為底稿，保留未要求更動的規則與商品（" +
                           "、".join(pending["symbols"]) + "）；使用者修改要求：" + detail.strip(),
                           pending_policy=pending)
 
-    def auto_draft(self, detail=""):
+    @staticmethod
+    def risk_request(message):
+        value = r"(\d+(?:\.\d+)?)\s*%"
+        cash = r"(\d+(?:\.\d+)?)\s*(?:USD|美元|美金|帳戶幣別)?"
+        lots = r"(\d+(?:\.\d+)?)\s*手"
+        patterns = (("risk_amount", rf"(?:(?:每筆|單筆)\s*)?(?:停損\s*)?(?:最多\s*)?(?:虧損|虧|損失)\s*(?:最多\s*)?{cash}"),
+                    ("fixed_lots", rf"(?:(?:每筆|單筆)\s*)?(?:固定\s*)?{lots}"),
+                    ("total_risk_pct", rf"(?:總持倉風險|總風險|合計風險)\s*{value}"),
+                    ("daily_loss_pct", rf"(?:每日損失|每日虧損|日損)\s*{value}"),
+                    ("drawdown_pct", rf"(?:總回撤|最大回撤|回撤)\s*{value}"),
+                    ("risk_pct", rf"(?:(?:每筆|單筆)(?:交易)?\s*)?(?:風險\s*)?{value}\s*(?:風險)?"))
+        for field, pattern in patterns:
+            match = re.fullmatch(pattern, message)
+            if match:
+                return field, float(match.group(1))
+        return None
+
+    def risk_draft(self, field, amount, original):
+        limit = 1e12 if field == "risk_amount" else 100000 if field == "fixed_lots" else 100
+        minimum = 0.00000001 if field == "fixed_lots" else 0.01
+        if not minimum <= amount <= limit:
+            raise ValueError("風險數值須大於零且在可表示範圍內")
+        if field == "risk_amount":
+            currency = self.snapshot().get("currency", "")
+            if not currency:
+                raise ValueError("EA 尚未提供帳戶幣別；請等候快照更新後再設定金額")
+            if re.search(r"USD|美元|美金", original, re.IGNORECASE) and currency != "USD":
+                raise ValueError("此帳戶幣別是 " + currency + "，不能把美元金額直接當成帳戶幣別；請用帳戶幣別重新指定")
+        _, pending = self.pending_policy()
+        current = self.policy()
+        before = pending or (current.to_dict() if current else None)
+        if not before:
+            if field not in {"risk_pct", "total_risk_pct", "risk_amount", "fixed_lots"}:
+                raise ValueError("請先建立策略，再設定此項風險百分比")
+            return self.auto_draft(original, risk_change=(field, amount))
+        if field == "risk_pct" and amount > before["total_risk_pct"]:
+            raise ValueError("單筆風險不可高於總持倉風險；請先提高總風險，或改用較低的單筆數值")
+        if field == "total_risk_pct" and before.get("risk_mode", "percent") == "percent" and amount < before["risk_pct"]:
+            raise ValueError("總持倉風險不可低於單筆風險；請先降低單筆風險")
+        changes = {field: amount}
+        if field in {"risk_pct", "risk_amount", "fixed_lots"}:
+            changes |= {"risk_mode": {"risk_pct": "percent", "risk_amount": "cash",
+                                      "fixed_lots": "fixed_lots"}[field],
+                        "risk_amount": amount if field == "risk_amount" else 0.0,
+                        "fixed_lots": amount if field == "fixed_lots" else 0.0}
+        policy = StrategyPolicy.parse(before | changes, self.version()+1)
+        identifier = self.propose("policy", policy.to_dict())
+        return self.policy_preview(policy, before, identifier)
+
+    def auto_draft(self, detail="", risk_change=None):
         percentages = re.findall(r"(\d+(?:\.\d+)?)\s*%", detail)
         if len(percentages) > 1:
             raise ValueError("一次請設定一種風險數值；分別說明每筆或總持倉風險")
@@ -168,23 +251,23 @@ class Agent:
         if percentages:
             amount = float(percentages[0])
             if "總風險" in detail or "總持倉風險" in detail or "合計風險" in detail:
-                if not 0.01 <= amount <= 1.5:
-                    raise ValueError("總持倉風險須在 0.01% 至 1.5% 之間")
+                if not 0.01 <= amount <= 100:
+                    raise ValueError("總持倉風險須在 0.01% 至 100% 之間")
                 total = amount
             else:
-                if not 0.01 <= amount <= 0.5:
-                    raise ValueError("目前每筆交易風險上限是 0.5%；請改填 0.5% 以下")
+                if not 0.01 <= amount <= 100:
+                    raise ValueError("單筆風險須在 0.01% 至 100% 之間")
                 per_trade = amount
         instruction = ("請根據目前可分析商品的已完成 K 棒，自行選擇適合的交易方法與商品；"
                        "可以比較趨勢、突破、區間或結構，但須明確寫出各方法何時適用、進場確認、失效與退出條件。"
                        "把它整理成可檢閱的策略卡；後續每次分析可在已確認方法內擇優或觀望，"
                        "不得自行新增方法、改變方向或風控。" + ("使用者補充：" + detail if detail else ""))
-        return self.draft(instruction, auto=True, per_trade=per_trade, total=total)
+        return self.draft(instruction, auto=True, per_trade=per_trade, total=total, risk_change=risk_change)
 
-    def draft(self, instruction, auto=False, per_trade=None, total=None, pending_policy=None):
+    def draft(self, instruction, auto=False, per_trade=None, total=None, pending_policy=None, risk_change=None):
         snapshot = self.snapshot()
         if snapshot.get("ea_version") != REQUIRED_EA_VERSION:
-            raise ValueError("請先在 MT5 重新掛載 v1.010 EA，再建立策略")
+            raise ValueError("請先在 MT5 重新掛載 v1.011 EA，再建立策略")
         current = self.policy()
         # A strategy draft needs historical bars, not a live quote or known commission.
         # The latter are mandatory only when the account is resumed and an entry is sent.
@@ -224,11 +307,43 @@ class Agent:
         if not isinstance(result["policy"], dict):
             raise ValueError("AI 策略卡格式不正確")
         proposed = result["policy"]
+        previous = pending_policy or (current.to_dict() if current else {})
+        requested = set()
+        if re.search(r"(?:總持倉風險|總風險|合計風險)\s*\d+(?:\.\d+)?\s*%", instruction):
+            requested.add("total_risk_pct")
+        if re.search(r"(?:每日損失|每日虧損|日損)\s*\d+(?:\.\d+)?\s*%", instruction):
+            requested.add("daily_loss_pct")
+        if re.search(r"(?:總回撤|最大回撤|回撤)\s*\d+(?:\.\d+)?\s*%", instruction):
+            requested.add("drawdown_pct")
+        if re.search(r"(?:每筆|單筆|風險)\s*\d+(?:\.\d+)?\s*%|(?:每筆|單筆)\s*風險\s*\d+(?:\.\d+)?\s*%", instruction):
+            requested.update(("risk_pct", "risk_mode", "risk_amount", "fixed_lots"))
+        if re.search(r"\d+(?:\.\d+)?\s*手|(?:虧|損失)\s*\d+(?:\.\d+)?", instruction):
+            requested.update(("risk_mode", "risk_amount", "fixed_lots"))
+        for key, default in (("risk_pct", 0.5), ("total_risk_pct", 1.5),
+                             ("daily_loss_pct", 2.0), ("drawdown_pct", 5.0),
+                             ("risk_mode", "percent"), ("risk_amount", 0.0), ("fixed_lots", 0.0)):
+            if key not in requested:
+                proposed[key] = previous.get(key, default)
         if per_trade is not None:
-            proposed = proposed | {"risk_pct": per_trade}
+            proposed = proposed | {"risk_pct": per_trade, "risk_mode": "percent",
+                                   "risk_amount": 0.0, "fixed_lots": 0.0}
         if total is not None:
             proposed = proposed | {"total_risk_pct": total}
+        if risk_change:
+            field, amount = risk_change
+            proposed[field] = amount
+            if field in {"risk_pct", "risk_amount", "fixed_lots"}:
+                proposed |= {"risk_mode": {"risk_pct": "percent", "risk_amount": "cash",
+                                          "fixed_lots": "fixed_lots"}[field],
+                             "risk_amount": amount if field == "risk_amount" else 0.0,
+                             "fixed_lots": amount if field == "fixed_lots" else 0.0}
         policy = StrategyPolicy.parse(proposed, self.version()+1)
+        if policy.risk_mode == "cash":
+            currency = snapshot.get("currency", "")
+            if not currency:
+                raise ValueError("EA 尚未提供帳戶幣別；無法確認金額風險")
+            if re.search(r"USD|美元|美金", instruction, re.IGNORECASE) and currency != "USD":
+                raise ValueError("此帳戶幣別是 " + currency + "，不能把美元金額直接當成帳戶幣別")
         if len(dumps(policy.to_dict())) > 10000:
             raise ValueError("策略卡過長，請縮短為可完整檢閱的策略")
         if set(policy.symbols) - set(choices):
@@ -265,14 +380,15 @@ class Agent:
         elif row["kind"] == "resume":
             snapshot = self.snapshot()
             if snapshot.get("ea_version") != REQUIRED_EA_VERSION:
-                raise ValueError("請先在 MT5 重新掛載 v1.010 EA，再啟動新單")
+                raise ValueError("請先在 MT5 重新掛載 v1.011 EA，再啟動新單")
             p = self.policy()
             if self.cfg.get("account_mode", "demo") == "real" and not self.cfg.get("live_enabled", False):
                 raise ValueError("此實盤帳號尚未授權自動新單")
             if not p or snapshot.get("halted") or snapshot.get("state_ok") is not True:
                 raise ValueError("尚無策略或 EA 風控鎖定，不能啟動")
-            if set(p.symbols) - set(snapshot["symbols"]) or not all(snapshot["symbols"][s].get("ready") for s in p.symbols):
-                raise ValueError("行情尚未就緒")
+            issues = self.market_issues(snapshot, p)
+            if issues:
+                raise ValueError("行情尚未就緒：" + "；".join(issues) + "。這次確認碼已使用；行情恢復後請再傳『啟動』取得新確認碼")
             self.store.set("paused", False)
             self.store.set("resume_nonce", self.store.get("resume_nonce", 0)+1)
         elif row["kind"] == "close":
@@ -298,14 +414,20 @@ class Agent:
         if message in {"自動模式", "/auto"} or message.startswith(("自動模式 ", "/auto ")):
             detail = message.split(" ", 1)[1].strip() if " " in message else ""
             return self.auto_draft(detail)
-        if re.fullmatch(r"(?:(?:每筆|單筆)(?:交易)?\s*)?(?:風險\s*)?\d+(?:\.\d+)?\s*%\s*(?:風險)?", message):
-            return self.auto_draft(message)
+        risk = self.risk_request(message)
+        if risk:
+            return self.risk_draft(*risk, message)
         if message.startswith(("策略 ", "/strategy ")):
             return self.draft(message.split(" ", 1)[1])
         if message.startswith(("修改 ", "調整 ", "改成 ")):
             return self.revise_draft(message.split(" ", 1)[1])
         if message.startswith(("確認 ", "/confirm ")):
-            return self.confirm(message.split(" ", 1)[1].strip())
+            identifier = message.split(" ", 1)[1].strip()
+            try:
+                return self.confirm(identifier)
+            except ValueError as exc:
+                self.store.event("proposal_rejected", {"id": identifier[:64], "reason": str(exc)})
+                raise
         if message in {"暫停", "/pause"}:
             self.store.set("paused", True)
             self.publish()
@@ -337,10 +459,39 @@ class Agent:
                 parts.append("目前沒有持倉。")
             if s["halted"] or s.get("state_ok") is not True:
                 parts.append("風控已鎖定，暫不開新單。")
+            if p:
+                issues = self.market_issues(s, p)
+                parts.append("策略商品行情：" + ("已就緒。" if not issues else "；".join(issues) + "。"))
             parts.append("AI：" + self.api_status + "。")
             return "\n".join(parts)
         if message in {"原因", "/why"}:
-            return dumps(self.store.memory(8))
+            parts = []
+            p = self.policy()
+            if not p:
+                parts.append("尚未確認策略，所以不會開新單。")
+            else:
+                parts.append("目前" + ("暫停新單" if self.store.get("paused", True) else "已啟用自動交易") + "；已確認策略：" + p.title + "。")
+                try:
+                    issues = self.market_issues(self.snapshot(), p)
+                    if issues:
+                        parts.append("目前行情阻止啟動：" + "；".join(issues) + "。")
+                except (OSError, ValueError, TypeError, KeyError) as exc:
+                    parts.append("目前無法核對 MT5 快照：" + str(exc)[:180] + "。")
+            recent = []
+            for event in reversed(self.store.recent(30)):
+                data = event["data"]
+                if event["kind"] == "proposal_rejected":
+                    recent.append("確認未套用：" + str(data.get("reason", "原因未記錄"))[:400])
+                elif event["kind"] == "confirmed" and data.get("kind") == "policy":
+                    recent.append("策略卡已確認保存；這不等於啟動交易。")
+                elif event["kind"] == "decision":
+                    decision = data.get("decision", {})
+                    recent.append("最近 AI 決策：" + str(decision.get("symbol", "")) + " " +
+                                  str(decision.get("action", "")) + "；" + str(decision.get("reason", ""))[:400])
+                if len(recent) >= 3:
+                    break
+            parts.extend(recent or ["目前沒有可顯示的策略或交易決策紀錄。"])
+            return "\n".join(parts)
         pending_id, pending_policy = self.pending_policy()
         answer = self.provider.call("chat", {"question": message, "snapshot": self.snapshot(),
                                              "policy": self.store.get("policy"), "pending_policy": pending_policy,
@@ -504,7 +655,9 @@ class Agent:
             entries_allowed = ea_ready and not paused and (self.cfg.get("account_mode", "demo") == "demo" or self.cfg.get("live_enabled", False))
             self.bridge.csv("policy.csv", [1, self.cfg["account"], self.cfg["server"], self.cfg["magic"], p.version, int(time.time())+45,
                        int(entries_allowed), p.direction, p.risk_pct, p.total_risk_pct, p.daily_loss_pct, p.drawdown_pct,
-                       "|".join(p.symbols), self.store.get("reset_nonce", 0), self.store.get("resume_nonce", 0)])
+                       "|".join(p.symbols), self.store.get("reset_nonce", 0), self.store.get("resume_nonce", 0),
+                       p.risk_mode, format(p.risk_amount if p.risk_mode == "cash" else
+                                           p.fixed_lots if p.risk_mode == "fixed_lots" else 0.0, ".8f")])
         pending = self.store.get("pending", "")
         row = self.store.db.execute("SELECT * FROM proposals WHERE id=? AND status='pending' AND expires>?", (pending, time.time())).fetchone()
         pending_text = (row["kind"]+" "+row["id"]+"\n"+row["data"]) if row else ""

@@ -147,7 +147,8 @@ class AccountRouter:
                                          "symbols": [mapping[s] for s in template.symbols]}
             previous = agent.policy()
             if previous:
-                for key in ("risk_pct", "total_risk_pct", "daily_loss_pct", "drawdown_pct"):
+                for key in ("risk_pct", "total_risk_pct", "daily_loss_pct", "drawdown_pct",
+                            "risk_mode", "risk_amount", "fixed_lots"):
                     data[key] = getattr(previous, key)
             policy = StrategyPolicy.parse(data, agent.version()+1)
             plan.append({"account_id": identifier, "base_version": agent.version(),
@@ -158,8 +159,11 @@ class AccountRouter:
         for item in plan:
             p = item["policy"]
             mode = "[實盤]" if self.agents[item["account_id"]].cfg.get("account_mode") == "real" else "[模擬]"
+            single = (str(p["risk_amount"]) + " 帳戶幣別" if p["risk_mode"] == "cash" else
+                      str(p["fixed_lots"]) + " 手" if p["risk_mode"] == "fixed_lots" else
+                      str(p["risk_pct"]) + "%")
             lines.append(self.account_label(item["account_id"])+mode+"：商品="+",".join(p["symbols"])+"；映射="+item["symbol_source"]+
-                         "；版本="+str(p["version"])+"；單筆/總風險="+str(p["risk_pct"])+"%/"+str(p["total_risk_pct"])+"%")
+                         "；版本="+str(p["version"])+"；單筆/總風險="+single+"/"+str(p["total_risk_pct"])+"%")
         if len("\n".join(lines)) > 13500:
             raise ValueError("全部策略卡過長，請縮短規則或分組設定帳號")
         proposal = uuid.uuid4().hex

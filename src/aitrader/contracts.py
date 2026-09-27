@@ -43,6 +43,9 @@ class StrategyPolicy:
     total_risk_pct: float = 1.5
     daily_loss_pct: float = 2.0
     drawdown_pct: float = 5.0
+    risk_mode: str = "percent"
+    risk_amount: float = 0.0
+    fixed_lots: float = 0.0
 
     @classmethod
     def parse(cls, data: dict, version: int) -> StrategyPolicy:
@@ -61,10 +64,18 @@ class StrategyPolicy:
             token(symbol)
         if not obj.timeframes or set(obj.timeframes) - {"M5", "M15", "H1", "H4"}:
             raise ValueError("unsupported timeframe")
-        number(obj.risk_pct, 0.01, 0.5)
-        number(obj.total_risk_pct, obj.risk_pct, 1.5)
-        number(obj.daily_loss_pct, 0.01, 2)
-        number(obj.drawdown_pct, 0.01, 5)
+        number(obj.risk_pct, 0.01, 100)
+        number(obj.total_risk_pct, obj.risk_pct if obj.risk_mode == "percent" else 0.01, 100)
+        number(obj.daily_loss_pct, 0.01, 100)
+        number(obj.drawdown_pct, 0.01, 100)
+        if obj.risk_mode not in {"percent", "cash", "fixed_lots"}:
+            raise ValueError("invalid risk mode")
+        number(obj.risk_amount, 0, 1e12)
+        number(obj.fixed_lots, 0, 100000)
+        if ((obj.risk_mode == "percent" and (obj.risk_amount != 0 or obj.fixed_lots != 0)) or
+            (obj.risk_mode == "cash" and (obj.risk_amount <= 0 or obj.fixed_lots != 0)) or
+            (obj.risk_mode == "fixed_lots" and (obj.fixed_lots <= 0 or obj.risk_amount != 0))):
+            raise ValueError("risk sizing fields conflict")
         return obj
 
     def to_dict(self):

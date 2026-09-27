@@ -96,6 +96,18 @@ def test_auto_mode_can_draft_while_market_closed_or_commission_unknown(agent, sn
         agent.confirm(agent.propose("resume", {}))
 
 
+def test_rejected_resume_explains_market_and_why_is_readable_without_ai(agent, snapshot):
+    ready_bars(agent, snapshot, trade_ready=False)
+    agent.handle("啟動")
+    identifier = agent.store.get("pending")
+    with pytest.raises(ValueError, match="XAUUSD 未就緒.*佣金未知.*M5 0 根.*再傳『啟動』"):
+        agent.handle("確認 " + identifier)
+    explanation = agent.handle("原因")
+    assert "目前行情阻止啟動" in explanation and "XAUUSD 未就緒" in explanation
+    assert "確認未套用" in explanation and "confirmed" not in explanation
+    assert not agent.provider.calls
+
+
 def test_invalid_auto_strategy_never_creates_proposal(agent, snapshot):
     ready_bars(agent, snapshot)
     agent.provider.response = {"policy": ["buy everything"], "questions": []}
@@ -104,21 +116,102 @@ def test_invalid_auto_strategy_never_creates_proposal(agent, snapshot):
     assert agent.store.get("pending", "") == ""
 
 
-def test_risk_only_message_starts_auto_draft_with_requested_risk(agent, snapshot, policy):
+def test_risk_only_message_changes_confirmed_strategy_without_api_call(agent):
+    preview = agent.handle("單筆1%")
+    row = agent.store.db.execute("SELECT data FROM proposals WHERE id=?", (agent.store.get("pending"),)).fetchone()
+    assert json.loads(row[0])["risk_pct"] == 1.0
+    assert "單筆 1.0%" in preview and "確認 " in preview
+    assert not agent.provider.calls
+    agent.handle("確認 " + agent.store.get("pending"))
+    assert agent.policy().risk_pct == 1.0 and agent.store.get("paused", True) is True
+
+
+def test_risk_fields_can_be_set_separately_and_total_must_cover_per_trade(agent):
+    for message, field, value in (("總風險3%", "total_risk_pct", 3.0),
+                                  ("單筆2%", "risk_pct", 2.0),
+                                  ("日損4%", "daily_loss_pct", 4.0),
+                                  ("回撤10%", "drawdown_pct", 10.0)):
+        agent.handle(message)
+        row = agent.store.db.execute("SELECT data FROM proposals WHERE id=?", (agent.store.get("pending"),)).fetchone()
+        assert json.loads(row[0])[field] == value
+        agent.handle("確認 " + agent.store.get("pending"))
+    with pytest.raises(ValueError, match="不可高於總持倉風險"):
+        agent.handle("單筆5%")
+    assert not agent.provider.calls
+
+
+def test_risk_change_on_pending_card_replaces_it_without_second_api_call(agent, snapshot, policy):
     ready_bars(agent, snapshot)
     agent.provider.response = {"policy": policy, "questions": []}
-    agent.handle("風險0.3%")
-    row = agent.store.db.execute("SELECT data FROM proposals WHERE id=?", (agent.store.get("pending"),)).fetchone()
-    assert json.loads(row[0])["risk_pct"] == 0.3
-    with pytest.raises(ValueError, match="0.5%"):
-        agent.handle("自動模式 每筆風險1%")
+    agent.handle("自動模式")
+    first = agent.store.get("pending")
+    preview = agent.handle("單筆1%")
+    second = agent.store.get("pending")
+    assert second != first and "單筆 1.0%" in preview
+    assert agent.store.db.execute("SELECT status FROM proposals WHERE id=?", (first,)).fetchone()[0] == "superseded"
     assert len(agent.provider.calls) == 1
 
 
-def test_auto_mode_total_risk_example_keeps_per_trade_limit(agent, snapshot, policy):
+def test_cash_and_fixed_lots_are_reviewable_local_policy_changes(agent):
+    cash_preview = agent.handle("每筆虧10美元")
+    first = agent.store.get("pending")
+    row = agent.store.db.execute("SELECT data FROM proposals WHERE id=?", (first,)).fetchone()
+    cash = json.loads(row[0])
+    assert cash["risk_mode"] == "cash" and cash["risk_amount"] == 10
+    assert "每筆停損最多 10.0 帳戶幣別" in cash_preview
+    lot_preview = agent.handle("固定0.1手")
+    second = agent.store.get("pending")
+    row = agent.store.db.execute("SELECT data FROM proposals WHERE id=?", (second,)).fetchone()
+    lots = json.loads(row[0])
+    assert lots["risk_mode"] == "fixed_lots" and lots["fixed_lots"] == 0.1
+    assert lots["risk_amount"] == 0 and "每筆固定 0.1 手" in lot_preview
+    assert agent.store.db.execute("SELECT status FROM proposals WHERE id=?", (first,)).fetchone()[0] == "superseded"
+    assert not agent.provider.calls
+
+
+def test_cash_amount_requires_matching_account_currency(agent, snapshot):
+    atomic_write(agent.bridge.root / "snapshot.json", json.dumps(snapshot | {"currency": "EUR"}))
+    with pytest.raises(ValueError, match="不能把美元金額直接當成帳戶幣別"):
+        agent.handle("每筆虧10美元")
+    preview = agent.handle("每筆虧10")
+    assert "每筆停損最多 10.0 帳戶幣別" in preview
+
+
+def test_risk_revision_only_changes_sizing_and_bridge_serializes_decimal(agent):
+    preview = agent.handle("固定0.00000001手")
+    assert "固定 1e-08 手" in preview
+    assert not agent.provider.calls
+    agent.handle("確認 " + agent.store.get("pending"))
+    agent.publish()
+    assert (agent.bridge.root / "policy.csv").read_text().strip().endswith(",fixed_lots,0.00000001")
+    agent.handle("固定0.1手")
+    preview = agent.handle("修改 每筆虧10美元")
+    assert "每筆停損最多 10.0 帳戶幣別" in preview
+    assert not agent.provider.calls
+
+
+def test_cash_and_fixed_lot_direct_commands_are_not_freeform_questions():
+    from aitrader.service import Agent
+    assert Agent.risk_request("單筆虧20 USD") == ("risk_amount", 20.0)
+    assert Agent.risk_request("每筆固定0.01手") == ("fixed_lots", 0.01)
+    assert Agent.risk_request("0.1手") == ("fixed_lots", 0.1)
+    assert Agent.risk_request("0.1手配這個停損會虧多少？") is None
+
+
+def test_risk_only_starts_auto_draft_when_no_policy_exists(agent, snapshot, policy):
+    agent.store.set("policy", None)
     ready_bars(agent, snapshot)
     agent.provider.response = {"policy": policy, "questions": []}
-    agent.handle("自動模式 總風險1%")
+    agent.handle("單筆1%")
+    row = agent.store.db.execute("SELECT data FROM proposals WHERE id=?", (agent.store.get("pending"),)).fetchone()
+    assert json.loads(row[0])["risk_pct"] == 1.0
+    assert agent.provider.calls[-1][0] == "strategy"
+
+
+def test_ai_strategy_revision_cannot_silently_reset_user_risk(agent, snapshot, policy):
+    agent.store.set("policy", policy | {"risk_pct": 1.0, "total_risk_pct": 3.0})
+    agent.provider.response = {"policy": policy, "questions": []}
+    agent.handle("策略 用 SMC 分析 XAUUSD")
     row = agent.store.db.execute("SELECT data FROM proposals WHERE id=?", (agent.store.get("pending"),)).fetchone()
     proposed = json.loads(row[0])
-    assert proposed["risk_pct"] == 0.5 and proposed["total_risk_pct"] == 1.0
+    assert proposed["risk_pct"] == 1.0 and proposed["total_risk_pct"] == 3.0

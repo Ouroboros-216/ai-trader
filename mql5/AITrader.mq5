@@ -1,5 +1,5 @@
 #property strict
-#property version "1.010"
+#property version "1.011"
 #property description "Independent AI operator with exact account-mode binding. Python bridge required."
 
 // Self-contained execution wrapper: no terminal-local include dependency.
@@ -75,6 +75,8 @@ long policy_expiry=0, daykey=0;
 double highwater=0,daybase=0,risk_pct=0.5,total_pct=1.5,daily_pct=2,dd_pct=5;
 bool state_ok=false,daily_halt=false,total_halt=false,local_pause=true,enabled=false;
 string direction="BOTH",policy_symbols="";
+string sizing_mode="percent";
+double sizing_value=0;
 ulong last_snapshot=0,last_panel=0,last_history=0,last_catalog=0;
 string prefix="AIT_";
 
@@ -160,7 +162,7 @@ void LoadState()
    for(int i=13;i<17;i++) if(!DecimalNumber(a[i])) return;
    if((a[7]!="0"&&a[7]!="1")||(a[8]!="0"&&a[8]!="1")||(a[11]!="0"&&a[11]!="1")) return;
    risk_pct=StringToDouble(a[13]); total_pct=StringToDouble(a[14]); daily_pct=StringToDouble(a[15]); dd_pct=StringToDouble(a[16]);
-   if(!(risk_pct>0&&risk_pct<=0.5&&total_pct>=risk_pct&&total_pct<=1.5&&daily_pct>0&&daily_pct<=2&&dd_pct>0&&dd_pct<=5)) return;
+   if(!(risk_pct>0&&risk_pct<=100&&total_pct>0&&total_pct<=100&&daily_pct>0&&daily_pct<=100&&dd_pct>0&&dd_pct<=100)) return;
    daily_halt=(a[7]=="1"); total_halt=(a[8]=="1"); reset_nonce=(int)StringToInteger(a[9]); resume_nonce=(int)StringToInteger(a[10]);
    local_pause=(a[11]=="1"); policy_version=(int)StringToInteger(a[12]); state_ok=true;
 }
@@ -247,17 +249,24 @@ bool TradeAllowed()
 void ReadPolicy()
 {
    enabled=false;
-   string a[]; if(StringSplit(Read("policy.csv"),',',a)!=15) return;
+   string a[]; if(StringSplit(Read("policy.csv"),',',a)!=17) return;
    if(!DigitsOnly(a[3])||!DigitsOnly(a[4])||!DigitsOnly(a[5])||!DigitsOnly(a[13])||!DigitsOnly(a[14])||(a[6]!="0"&&a[6]!="1")) return;
    for(int i=8;i<=11;i++) if(!DecimalNumber(a[i])) return;
+   if(!DecimalNumber(a[16])) return;
    if(a[0]!="1"||a[1]!=Account()||a[2]!=Server()||(ulong)StringToInteger(a[3])!=InpMagic) return;
    int version=(int)StringToInteger(a[4]); long expiry=StringToInteger(a[5]);
    if(version<policy_version||version<=0||expiry<Now()||expiry>Now()+60) return;
    double r=StringToDouble(a[8]),t=StringToDouble(a[9]),d=StringToDouble(a[10]),dd=StringToDouble(a[11]);
-   if(!(r>0&&r<=0.5&&t>=r&&t<=1.5&&d>0&&d<=2&&dd>0&&dd<=5)) return;
+   string mode=a[15]; double size=StringToDouble(a[16]);
+   if(!(r>0&&r<=100&&t>0&&t<=100&&d>0&&d<=100&&dd>0&&dd<=100)) return;
+   if(mode=="percent"&&t<r) return;
+   if(!((mode=="percent"&&size==0)||
+        (mode=="cash"&&size>0&&size<=1e12)||
+        (mode=="fixed_lots"&&size>0&&size<=100000))) return;
    if(a[7]!="BUY"&&a[7]!="SELL"&&a[7]!="BOTH") return;
    bool changed=(policy_version!=version); policy_version=version; policy_expiry=expiry;
    direction=a[7]; policy_symbols=a[12]; risk_pct=r; total_pct=t; daily_pct=d; dd_pct=dd;
+   sizing_mode=mode; sizing_value=size;
    int rn=(int)StringToInteger(a[13]),sn=(int)StringToInteger(a[14]);
    if(rn>reset_nonce&&state_ok&&!AnyOwned()) { reset_nonce=rn; total_halt=false; highwater=AccountInfoDouble(ACCOUNT_EQUITY); local_pause=true; changed=true; }
    if(sn>resume_nonce&&state_ok&&!total_halt&&!daily_halt) { resume_nonce=sn; local_pause=false; changed=true; }
@@ -385,13 +394,29 @@ bool SendEntry(string symbol,string action,double sl,double tp,string id)
    double unitloss=0;
    if(!OrderCalcProfit(type,symbol,1,buy?q.ask+slip:q.bid-slip,buy?sl-slip:sl+slip,unitloss)||unitloss>=0) { Result(id,"REJECTED",0,"risk calculation failed"); return false; }
    unitloss=-unitloss+commission;
-   double equity=AccountInfoDouble(ACCOUNT_EQUITY),budget=equity*risk_pct/100;
+   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
    double current=TotalRisk(); if(current<0) { Result(id,"REJECTED",0,"unknown existing risk"); return false; }
-   budget=MathMin(budget,equity*total_pct/100-current);
+   double remaining=equity*total_pct/100-current;
+   double budget=sizing_mode=="cash"?MathMin(sizing_value,remaining):
+                 sizing_mode=="fixed_lots"?remaining:MathMin(equity*risk_pct/100,remaining);
    double step=SymbolInfoDouble(symbol,SYMBOL_VOLUME_STEP),minimum=SymbolInfoDouble(symbol,SYMBOL_VOLUME_MIN),maximum=SymbolInfoDouble(symbol,SYMBOL_VOLUME_MAX);
    if(step<=0||budget<=0) { Result(id,"REJECTED",0,"risk budget exhausted"); return false; }
-   double volume=NormalizeDouble(MathFloor(MathMin(budget/unitloss,maximum)/step)*step,8);
-   if(volume<minimum||volume*unitloss>budget+0.000001) { Result(id,"REJECTED",0,"minimum lot exceeds budget"); return false; }
+   double volume=0;
+   if(sizing_mode=="fixed_lots")
+   {
+      double steps=sizing_value/step;
+      if(sizing_value<minimum||sizing_value>maximum||MathAbs(steps-MathRound(steps))>0.000001)
+      { Result(id,"REJECTED",0,"fixed lot outside broker volume step/range"); return false; }
+      volume=NormalizeDouble(sizing_value,8);
+      if(volume*unitloss>budget+0.000001)
+      { Result(id,"REJECTED",0,"fixed lot exceeds total risk budget"); return false; }
+   }
+   else
+   {
+      volume=NormalizeDouble(MathFloor(MathMin(budget/unitloss,maximum)/step)*step,8);
+      if(volume<minimum||volume*unitloss>budget+0.000001)
+      { Result(id,"REJECTED",0,"minimum lot exceeds budget"); return false; }
+   }
    double margin=0;
    if(!OrderCalcMargin(type,symbol,volume,buy?q.ask:q.bid,margin)||margin>AccountInfoDouble(ACCOUNT_MARGIN_FREE)*0.9) { Result(id,"REJECTED",0,"insufficient margin"); return false; }
    trade.SetTypeFillingBySymbol(symbol); trade.SetDeviationInPoints((ulong)StringToInteger(slips[idx]));
@@ -460,7 +485,7 @@ string Bars(string symbol,ENUM_TIMEFRAMES tf,bool &ready)
 }
 void Snapshot()
 {
-   string out="{\"schema\":1,\"ea_version\":\"1.010\",\"account\":"+J(Account())+",\"server\":"+J(Server())+",\"magic\":"+(string)InpMagic+",\"demo\":"+Bool(IsDemo())+",\"account_mode\":"+J(bound_mode)+",\"live_enabled\":"+Bool(live_allowed)+",\"time\":"+(string)Now()+",\"equity\":"+Num(AccountInfoDouble(ACCOUNT_EQUITY))+",\"balance\":"+Num(AccountInfoDouble(ACCOUNT_BALANCE))+",\"currency\":"+J(AccountInfoString(ACCOUNT_CURRENCY))+",\"state_ok\":"+Bool(state_ok)+",\"halted\":"+Bool(daily_halt||total_halt||!state_ok)+",\"local_pause\":"+Bool(local_pause)+",\"missing_symbols\":["+missing+"],\"positions\":[";
+   string out="{\"schema\":1,\"ea_version\":\"1.011\",\"account\":"+J(Account())+",\"server\":"+J(Server())+",\"magic\":"+(string)InpMagic+",\"demo\":"+Bool(IsDemo())+",\"account_mode\":"+J(bound_mode)+",\"live_enabled\":"+Bool(live_allowed)+",\"time\":"+(string)Now()+",\"equity\":"+Num(AccountInfoDouble(ACCOUNT_EQUITY))+",\"balance\":"+Num(AccountInfoDouble(ACCOUNT_BALANCE))+",\"currency\":"+J(AccountInfoString(ACCOUNT_CURRENCY))+",\"state_ok\":"+Bool(state_ok)+",\"halted\":"+Bool(daily_halt||total_halt||!state_ok)+",\"local_pause\":"+Bool(local_pause)+",\"missing_symbols\":["+missing+"],\"positions\":[";
    int count=0;
    for(int i=0;i<PositionsTotal();i++)
    {
@@ -550,8 +575,11 @@ void Panel()
    int h=FileOpen(base+"panel.txt",FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ|FILE_SHARE_WRITE,0,CP_UTF8);
    if(h!=INVALID_HANDLE) { while(!FileIsEnding(h)) info+=FileReadString(h)+"\n"; FileClose(h); }
    string next_pending=Read("pending.csv"); if(next_pending!=pending_id) panel_page=0; pending_id=next_pending;
+   string sizing=sizing_mode=="cash"?"risk cash "+DoubleToString(sizing_value,2):
+                 sizing_mode=="fixed_lots"?"fixed "+DoubleToString(sizing_value,3)+" lots":
+                 "risk "+DoubleToString(risk_pct,2)+"%";
    string summary="AI Trader | "+(bound_mode=="real"?"REAL ACCOUNT":"DEMO ACCOUNT")+" | "+Account()+" | "+Server()+"\n"+
-           "Risk "+DoubleToString(risk_pct,2)+"% / total "+DoubleToString(total_pct,2)+"% | policy "+(string)policy_version+"\n"+
+           sizing+" / total "+DoubleToString(total_pct,2)+"% | policy "+(string)policy_version+"\n"+
            "EA state="+Bool(state_ok)+" daily halt="+Bool(daily_halt)+" total halt="+Bool(total_halt)+" local pause="+Bool(local_pause)+"\n"+
            "Bridge fresh="+Bool(policy_expiry>=Now())+" | "+status_text+"\n"+info;
    string raw[],lines[]; int count=StringSplit(summary,'\n',raw);

@@ -10,7 +10,7 @@ try {
 from pathlib import Path
 import hashlib, json, sys, zipfile
 root = Path.cwd()
-target = root/'dist'/'AITrader-v0.8.13.zip'
+target = root/'dist'/'AITrader-v0.8.14.zip'
 binary = root/'mql5'/'AITrader.ex5'
 if not binary.is_file(): raise SystemExit('Compile AITrader.ex5 before packaging')
 files = [root/'README.md', root/'pyproject.toml', root/'config'/'example.json', *root.glob('*.cmd')]
