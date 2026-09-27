@@ -110,6 +110,12 @@ bars 的 time 是券商伺服器時間，snapshot.time 為 UTC，不可混作新
 資料 incomplete/ready=false 或無法判斷時只能 WAIT。若已確認策略允許多種方法，理由須指出本輪採用的方法與行情依據；
 只能在策略卡寫明的方法與條件內擇優，不能自行增加新方法或修改風控。"""
 
+ENTRY_REVIEW = """這是新單送往 MT5 前的最後一次 AI 條件複核，不是重新設計交易。
+僅依已確認 policy、候選 decision 與最新 snapshot，逐項判斷候選方向、進場方法、已完成 K 棒觸發、失效條件、停損與目標是否仍符合策略。
+如價格、已完成 K 棒、點差、佣金或持倉資料不足，或無法證實任何必要條件，必須拒絕。
+不得修改候選商品、方向、停損、目標或手數；不能自行補造尚未提供的資訊。
+只回覆 {"allow":true/false,"reason":"繁體中文具體理由"}。有疑義時 allow=false。"""
+
 
 class Gemini:
     def __init__(self, config, store, transport=request_json, quota_store=None):
@@ -125,7 +131,7 @@ class Gemini:
             raise ValueError("Gemini key environment variable missing")
         now = time.time()
         call_id = self.quota_store.reserve_call(kind, cfg, now)
-        prompts = {"strategy": STRATEGY, "decisions": DECISIONS,
+        prompts = {"strategy": STRATEGY, "decisions": DECISIONS, "entry_review": ENTRY_REVIEW,
                    "chat": '只讀查詢。若有 pending_policy，使用者可能在討論這張尚未套用的草案；應根據草案回答，清楚區分已確認 policy，不得聲稱草案已套用。可討論百分比、帳戶幣別停損金額與固定手數的差異；未知停損價或商品規格時，不得假稱算出實際風險。不能透過聊天修改或確認策略；要修改時提示使用者傳「修改 你的要求」。回覆 {"answer":"..."}。'}
         try:
             generation = {"responseMimeType": "application/json", "maxOutputTokens": cfg["max_output_tokens"]}
@@ -222,7 +228,7 @@ class OpenAI:
             raise ValueError("OpenAI key environment variable missing")
         now = time.time()
         call_id = self.quota_store.reserve_call(kind, cfg, now)
-        prompts = {"strategy": STRATEGY, "decisions": DECISIONS,
+        prompts = {"strategy": STRATEGY, "decisions": DECISIONS, "entry_review": ENTRY_REVIEW,
                    "chat": '只讀查詢。若有 pending_policy，使用者可能在討論這張尚未套用的草案；應根據草案回答，清楚區分已確認 policy，不得聲稱草案已套用。可討論百分比、帳戶幣別停損金額與固定手數的差異；未知停損價或商品規格時，不得假稱算出實際風險。不能透過聊天修改或確認策略；要修改時提示使用者傳「修改 你的要求」。回覆 {"answer":"..."}。'}
         http_fields = ("", "", "")
         try:

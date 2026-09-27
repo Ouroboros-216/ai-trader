@@ -56,9 +56,11 @@ def test_analysis_queues_valid_commands(agent, decision):
     agent.store.set("paused", False)
     agent.provider.response = {"decisions": [decision]}
     agent.analyze()
+    agent.provider.response = {"allow": True, "reason": "最新已完成 K 棒仍符合原進場條件"}
     agent.dispatch()
     rows = commands(agent)
     assert len(rows) == 1 and rows[0]["status"] == "sent"
+    assert [kind for kind, _ in agent.provider.calls] == ["decisions", "entry_review"]
     wire = (agent.bridge.root / "command.csv").read_text()
     assert ",SELL,XAUUSD,0,3010,2980" in wire
     agent.dispatch()
@@ -123,6 +125,7 @@ def test_expired_command_is_not_published(agent, decision):
 def test_unacknowledged_command_never_retries_after_restart(agent, decision):
     agent.store.set("paused", False)
     agent.queue(DecisionProposal(**decision), "ai", time.time())
+    agent.provider.response = {"allow": True, "reason": "條件仍有效"}
     agent.dispatch()
     agent.store.db.execute("UPDATE commands SET expires=1")
     agent.store.db.commit()
@@ -132,6 +135,53 @@ def test_unacknowledged_command_never_retries_after_restart(agent, decision):
         assert other.store.get("paused") and commands(other)[0]["status"] == "UNCERTAIN"
     finally:
         other.close()
+
+
+def test_entry_review_denial_or_invalid_response_never_sends_order(agent, decision):
+    agent.store.set("paused", False)
+    for response in ({"allow": False, "reason": "M15 進場條件已失效"},
+                     {"allow": "true", "reason": "不合規"}):
+        agent.queue(DecisionProposal(**decision), "ai", time.time())
+        agent.provider.response = response
+        agent.dispatch()
+    assert [row["status"] for row in commands(agent)] == ["REJECTED", "REJECTED"]
+    assert not (agent.bridge.root / "command.csv").exists()
+    assert "進場前 AI 複核未通過" in agent.handle("原因")
+
+
+def test_entry_review_timeout_fails_closed(agent, decision):
+    agent.store.set("paused", False)
+    agent.queue(DecisionProposal(**decision), "ai", time.time())
+    agent.provider.error = TimeoutError("network")
+    agent.dispatch()
+    assert commands(agent)[0]["status"] == "REJECTED"
+    assert not (agent.bridge.root / "command.csv").exists()
+
+
+def test_entry_review_waits_for_local_api_cooldown(agent, decision):
+    agent.store.set("paused", False)
+    agent.queue(DecisionProposal(**decision), "ai", time.time())
+    agent.provider.error = ValueError("API local cooldown active")
+    agent.dispatch()
+    assert commands(agent)[0]["status"] == "queued"
+    agent.provider.error = None
+    agent.provider.response = {"allow": True, "reason": "條件仍有效"}
+    agent.dispatch()
+    assert commands(agent)[0]["status"] == "sent"
+
+
+def test_new_completed_bar_after_entry_review_cancels_order(agent, snapshot, decision):
+    agent.store.set("paused", False)
+    agent.queue(DecisionProposal(**decision), "ai", time.time())
+    def review(kind, payload):
+        assert kind == "entry_review"
+        snapshot["symbols"]["XAUUSD"]["bars"] = {"M15": [{"time": 123}]}
+        atomic_write(agent.bridge.root / "snapshot.json", json.dumps(snapshot))
+        return {"allow": True, "reason": "舊 K 棒條件成立"}
+    agent.provider.call = review
+    agent.dispatch()
+    assert commands(agent)[0]["status"] == "REJECTED"
+    assert not (agent.bridge.root / "command.csv").exists()
 
 
 @pytest.mark.parametrize("status,flat,expected", [("DONE", True, 2), ("DONE", False, 1), ("PARTIAL", True, 1), ("REJECTED", True, 1), ("UNCERTAIN", True, 1)])

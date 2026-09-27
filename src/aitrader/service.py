@@ -488,6 +488,9 @@ class Agent:
                     decision = data.get("decision", {})
                     recent.append("最近 AI 決策：" + str(decision.get("symbol", "")) + " " +
                                   str(decision.get("action", "")) + "；" + str(decision.get("reason", ""))[:400])
+                elif event["kind"] == "entry_review":
+                    recent.append("進場前 AI 複核" + ("通過" if data.get("allow") is True else "未通過") +
+                                  "：" + str(data.get("reason", "未提供理由"))[:400])
                 if len(recent) >= 3:
                     break
             parts.extend(recent or ["目前沒有可顯示的策略或交易決策紀錄。"])
@@ -562,6 +565,47 @@ class Agent:
             with self.store.db:
                 self.store.db.execute("UPDATE commands SET status='REJECTED' WHERE id=?", (row["id"],))
             return
+        if decision.action in {"BUY", "SELL"}:
+            try:
+                review = self.provider.call("entry_review", {"policy": p.to_dict(),
+                    "decision": decision.to_dict(), "snapshot": snapshot})
+            except Exception as exc:
+                if isinstance(exc, ValueError) and str(exc) == "API local cooldown active":
+                    return  # Keep queued until the shared API interval or command expiry.
+                with self.store.db:
+                    self.store.db.execute("UPDATE commands SET status='REJECTED' WHERE id=?", (row["id"],))
+                self.store.event("entry_review", {"id": row["id"], "allow": False,
+                                                  "reason": "AI 複核未完成（" + type(exc).__name__ + "）"})
+                return
+            if (not isinstance(review, dict) or type(review.get("allow")) is not bool or
+                not isinstance(review.get("reason"), str) or not 1 <= len(review["reason"].strip()) <= 1500):
+                allowed, reason = False, "AI 複核格式不正確"
+            else:
+                allowed, reason = review["allow"], review["reason"].strip()
+            self.store.event("entry_review", {"id": row["id"], "allow": allowed,
+                                              "reason": reason, "snapshot_time": snapshot["time"],
+                                              "model": self.cfg["provider"]["model"]})
+            if not allowed:
+                with self.store.db:
+                    self.store.db.execute("UPDATE commands SET status='REJECTED' WHERE id=?", (row["id"],))
+                return
+            try:
+                latest = self.snapshot()
+                before_bars = snapshot["symbols"][decision.symbol].get("bars", {})
+                after_bars = latest["symbols"][decision.symbol].get("bars", {})
+                if any((before_bars.get(tf) or [{}])[-1].get("time") !=
+                       (after_bars.get(tf) or [{}])[-1].get("time") for tf in p.timeframes):
+                    raise ValueError("複核後有新 K 棒收盤")
+                if (row["expires"] < time.time() or row["version"] != self.version() or
+                    self.store.get("paused", True) or latest.get("ea_version") != REQUIRED_EA_VERSION):
+                    raise ValueError("複核後指令或交易權限已失效")
+                DecisionProposal.parse(d, p, latest)
+            except (KeyError, TypeError, ValueError, OSError) as exc:
+                with self.store.db:
+                    self.store.db.execute("UPDATE commands SET status='REJECTED' WHERE id=?", (row["id"],))
+                self.store.event("entry_review", {"id": row["id"], "allow": False,
+                                                  "reason": "AI 複核後行情已變動或不可用：" + type(exc).__name__})
+                return
         action = "CLOSE" if decision.action == "REVERSE" else decision.action
         # Commit before file publication: never resend after an ambiguous crash.
         with self.store.db:
