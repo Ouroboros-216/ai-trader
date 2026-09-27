@@ -59,6 +59,9 @@ def test_bad_broker_cost_mapping_blocked(symbols, commissions):
 
 def test_one_commission_value_is_shared():
     assert valid_ea("XAUUSD,EURUSD,GBPUSD", "7") == ("XAUUSD,EURUSD,GBPUSD", "7")
+    assert valid_ea("AUTO", "-1") == ("AUTO", "-1")
+    with pytest.raises(ValueError):
+        valid_ea("AUTO", "7,0")
 
 
 def test_provider_factory_rejects_uninstalled_provider():

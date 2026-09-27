@@ -132,23 +132,73 @@ def _service_running(root: Path) -> bool:
         return True
 
 
-def install_stage(root: Path, stage: Path) -> None:
+def installed_ea_targets(appdata: Path | None = None) -> list[Path]:
+    """Find only terminals where AITrader is already installed for this Windows user."""
+    location = appdata if appdata is not None else Path(os.environ.get("APPDATA", ""))
+    if not location.is_absolute():
+        return []
+    base = location / "MetaQuotes" / "Terminal"
+    if not base.is_dir():
+        return []
+    resolved = base.resolve()
+    targets = []
+    for terminal in base.iterdir():
+        target = terminal / "MQL5" / "Experts" / "AITrader" / "AITrader.ex5"
+        if terminal.is_dir() and target.is_file() and target.resolve().is_relative_to(resolved):
+            targets.append(target)
+    if len(targets) > 20:
+        raise ValueError("找到超過 20 個 MT5 EA 安裝位置；請先檢查終端機資料夾")
+    return targets
+
+
+def sync_bundled_ea(root: Path, appdata: Path | None = None) -> int:
+    """Bridge upgrades launched by the pre-v0.8.7 updater, which copied app files only."""
+    source = root / "mql5" / "AITrader.ex5"
+    if not source.is_file():
+        raise ValueError("安裝包缺少 AITrader.ex5")
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    marker = root / "runtime" / "ea_sync.sha256"
+    if marker.is_file() and marker.read_text(encoding="ascii").strip() == digest:
+        return 0
+    targets = installed_ea_targets(appdata)
+    updated = 0
+    for target in targets:
+        if hashlib.sha256(target.read_bytes()).hexdigest() == digest:
+            continue
+        temporary = target.with_name(target.name + ".update-tmp")
+        try:
+            shutil.copy2(source, temporary)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        updated += 1
+    if targets:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(digest, encoding="ascii")
+    return updated
+
+
+def install_stage(root: Path, stage: Path, ea_targets: list[Path] | None = None) -> int:
     files = [(p, p.relative_to(stage / "files")) for p in (stage / "files").rglob("*") if p.is_file()]
+    ea_targets = ea_targets or []
+    ea_source = stage / "files" / "mql5" / "AITrader.ex5"
+    if not ea_source.is_file():
+        raise ValueError("更新包缺少已編譯的 AITrader.ex5")
+    operations = [(source, root / relative) for source, relative in files]
+    operations.extend((ea_source, target) for target in ea_targets)
     backup = stage / "backup"
     existed = []
     created = []
     try:
-        for source, relative in files:
-            target = root / relative
+        for index, (source, target) in enumerate(operations):
             if target.exists():
-                saved = backup / relative
+                saved = backup / str(index)
                 saved.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(target, saved)
                 existed.append((saved, target))
             else:
                 created.append(target)
-        for source, relative in files:
-            target = root / relative
+        for source, target in operations:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
     except Exception:
@@ -157,14 +207,16 @@ def install_stage(root: Path, stage: Path) -> None:
         for target in created:
             target.unlink(missing_ok=True)
         raise
+    return len(ea_targets)
 
 
-def apply_update(root: Path, expected_tag: str, read_url=_read_url) -> None:
+def apply_update(root: Path, expected_tag: str, read_url=_read_url) -> int:
     release = latest_release(root, read_url)
     if release["tag"] != expected_tag or version_tuple(release["version"]) <= version_tuple(current_version(root)):
         raise ValueError("發布版本已改變或不是新版；請重新檢查更新")
     (root / "runtime").mkdir(exist_ok=True)
     stage = verified_stage(root, release, read_url)
+    targets = installed_ea_targets()
     was_running = _service_running(root)
     if was_running:
         (root / "runtime" / "stop.request").write_text("stop", encoding="ascii")
@@ -173,21 +225,31 @@ def apply_update(root: Path, expected_tag: str, read_url=_read_url) -> None:
             time.sleep(0.5)
         if _service_running(root):
             raise ValueError("服務未能在 60 秒內停止；更新未安裝")
-    install_stage(root, stage)
+    try:
+        ea_count = install_stage(root, stage, targets)
+    except Exception:
+        if was_running:
+            _start_service(root)
+        raise
     if was_running:
-        (root / "runtime" / "stop.request").unlink(missing_ok=True)
-        out = (root / "runtime" / "service.out.log").open("a", encoding="utf-8")
-        err = (root / "runtime" / "service.err.log").open("a", encoding="utf-8")
-        try:
-            subprocess.Popen([sys.executable, "-m", "aitrader.multi", "run", "--root", str(root)],
-                             cwd=root, stdout=out, stderr=err,
-                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        finally:
-            out.close()
-            err.close()
+        _start_service(root)
     subprocess.Popen([sys.executable.replace("python.exe", "pythonw.exe") if os.name == "nt" else sys.executable,
                       "-m", "aitrader.setup_gui"], cwd=root,
                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return ea_count
+
+
+def _start_service(root: Path) -> None:
+    (root / "runtime" / "stop.request").unlink(missing_ok=True)
+    out = (root / "runtime" / "service.out.log").open("a", encoding="utf-8")
+    err = (root / "runtime" / "service.err.log").open("a", encoding="utf-8")
+    try:
+        subprocess.Popen([sys.executable, "-m", "aitrader.multi", "run", "--root", str(root)],
+                         cwd=root, stdout=out, stderr=err,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    finally:
+        out.close()
+        err.close()
 
 
 def main() -> None:
@@ -199,8 +261,8 @@ def main() -> None:
     root = args.root.resolve()
     log = root / "runtime" / "update.log"
     try:
-        apply_update(root, args.tag)
-        log.write_text("更新完成：" + args.tag + "\n", encoding="utf-8")
+        count = apply_update(root, args.tag)
+        log.write_text(f"更新完成：{args.tag}；已覆蓋 {count} 個 MT5 EA 資料夾。請在每個 MT5 重新掛載 EA。\n", encoding="utf-8")
     except Exception as exc:
         # URL and secrets are never logged; errors here are deliberately terse.
         log.write_text("更新失敗：" + type(exc).__name__ + "：" + str(exc)[:200] + "\n", encoding="utf-8")

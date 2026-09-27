@@ -260,6 +260,8 @@ def test_one_batch_strategy_applies_to_all_paused_accounts(agent, policy, tmp_pa
                              "database": str(tmp_path / "other.sqlite"), "account": "67890"}
     other = Agent(other_cfg, agent.provider)
     try:
+        other.bridge.root.joinpath("snapshot.json").write_text(json.dumps(
+            agent.snapshot() | {"account": "67890"}))
         agent.provider.response = {"policy": policy, "questions": []}
         router = AccountRouter({"demo-a": agent, "demo-b": other}, Store(tmp_path / "router.sqlite"))
         preview = router.handle("策略全部 用 SMC 只做空")
@@ -323,6 +325,10 @@ def test_batch_maps_new_symbol_from_each_broker_catalog(agent, policy, snapshot,
                              "database": str(tmp_path / "other.sqlite"), "account": "67890"}
     other = Agent(other_cfg, agent.provider)
     try:
+        broker_snapshot = snapshot | {"symbols": {"BTCUSD.a": snapshot["symbols"]["XAUUSD"]}}
+        agent.bridge.root.joinpath("snapshot.json").write_text(json.dumps(broker_snapshot))
+        other.bridge.root.joinpath("snapshot.json").write_text(json.dumps(
+            snapshot | {"account": "67890", "symbols": {"BTCUSDm": snapshot["symbols"]["XAUUSD"]}}))
         for item, symbols in ((agent, ["BTCUSD.a"]), (other, ["BTCUSDm"])):
             item.bridge.root.joinpath("catalog.json").write_text(json.dumps({
                 "account": item.cfg["account"], "server": item.cfg["server"], "magic": item.cfg["magic"],
@@ -348,9 +354,10 @@ def test_existing_offline_account_blocks_batch_without_partial_apply(agent, poli
         other.store.set("policy", policy)
         agent.provider.response = {"policy": policy, "questions": []}
         router = AccountRouter({"demo-a": agent, "demo-b": other}, Store(tmp_path / "router.sqlite"))
-        router.handle("策略全部 用 SMC 只做空")
-        with pytest.raises(ValueError, match="EA 快照未就緒"):
-            router.handle("確認 all|" + router.store.get("pending"))
+        with pytest.raises(ValueError, match="沒有共同商品"):
+            router.handle("策略全部 用 SMC 只做空")
+        assert agent.provider.calls == []
+        assert router.store.get("pending") is None
         assert agent.version() == 1 and other.version() == 1
     finally:
         other.close()
@@ -362,6 +369,8 @@ def test_interrupted_batch_recovery_pauses_every_account(agent, policy, tmp_path
                              "database": str(tmp_path / "other.sqlite"), "account": "67890"}
     other = Agent(other_cfg, agent.provider)
     try:
+        other.bridge.root.joinpath("snapshot.json").write_text(json.dumps(
+            agent.snapshot() | {"account": "67890"}))
         agent.provider.response = {"policy": policy, "questions": []}
         router = AccountRouter({"demo-a": agent, "demo-b": other}, Store(tmp_path / "router.sqlite"))
         router.handle("策略全部 用 SMC 只做空")

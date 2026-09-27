@@ -23,7 +23,7 @@ def canonical(symbol: str) -> str:
 
 
 def catalog(agent, snapshot: dict | None = None) -> list[str]:
-    """Use the current EA's full tradable broker catalog; old EA falls back to its snapshot."""
+    """Use the current EA's visible Market Watch catalog; old EA falls back to its snapshot."""
     try:
         raw = agent.bridge.json("catalog.json")
     except (OSError, ValueError):
@@ -43,7 +43,7 @@ def catalog(agent, snapshot: dict | None = None) -> list[str]:
         any(not isinstance(s, str) or not TOKEN.fullmatch(s) for s in symbols) or
         len(symbols) != len(set(symbols))):
         raise ValueError("券商商品清單格式不正確")
-    return symbols
+    return [s for s in symbols if s in snapshot["symbols"]] if snapshot else symbols
 
 
 def relevant(symbols: list[str], instruction: str, active: list[str] = ()) -> list[str]:

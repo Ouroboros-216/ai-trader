@@ -65,6 +65,31 @@ def test_analysis_queues_valid_commands(agent, decision):
     assert (agent.bridge.root / "command.csv").read_text() == wire
 
 
+def test_market_watch_removal_stops_new_analysis(agent, snapshot):
+    agent.store.set("paused", False)
+    snapshot["symbols"].pop("EURUSD")
+    atomic_write(agent.bridge.root / "snapshot.json", json.dumps(snapshot))
+    agent.analyze()
+    assert agent.provider.calls == []
+    assert commands(agent) == []
+
+
+def test_old_ea_snapshot_disables_new_entries_until_reloaded(agent, snapshot, decision):
+    agent.store.set("paused", False)
+    snapshot.pop("ea_version")
+    atomic_write(agent.bridge.root / "snapshot.json", json.dumps(snapshot))
+    agent.publish()
+    assert ",0,SELL," in (agent.bridge.root / "policy.csv").read_text()
+    agent.provider.response = {"decisions": [decision]}
+    agent.analyze()
+    assert not agent.provider.calls
+    agent.queue(DecisionProposal(**decision), "ai", time.time())
+    agent.dispatch()
+    assert commands(agent)[0]["status"] == "cancelled"
+    with pytest.raises(ValueError, match="重新掛載"):
+        agent.draft("用 SMC")
+
+
 def test_multi_symbol_batch_is_validated_before_any_queue(agent, decision):
     agent.store.set("paused", False)
     agent.provider.response = {"decisions": [decision, decision | {"action": "BUY"}]}

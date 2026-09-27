@@ -4,7 +4,7 @@ import zipfile
 
 import pytest
 
-from aitrader.updater import _archive_files, install_stage, latest_release, verified_stage, version_tuple
+from aitrader.updater import _archive_files, install_stage, installed_ea_targets, latest_release, sync_bundled_ea, verified_stage, version_tuple
 
 
 def package(entries):
@@ -25,6 +25,7 @@ def test_verified_release_installs_code_without_touching_local_state(tmp_path):
     data = package({"ai-trader/pyproject.toml": '[project]\nversion="0.8.4"\n',
                     "ai-trader/src/aitrader/setup_gui.py": "new GUI",
                     "ai-trader/src/aitrader/updater.py": "new updater",
+                    "ai-trader/mql5/AITrader.ex5": b"compiled ea",
                     "ai-trader/config/example.json": "{}"})
     digest = hashlib.sha256(data).hexdigest()
     release = {"version": "0.8.4", "zip_name": "AITrader-v0.8.4.zip", "zip_url": "https://example.test/package",
@@ -36,6 +37,36 @@ def test_verified_release_installs_code_without_touching_local_state(tmp_path):
     assert (root / "pyproject.toml").read_text() == '[project]\nversion="0.8.4"\n'
     assert (root / "config" / "local.json").read_text() == "private account"
     assert (root / "runtime" / "trades.sqlite").read_bytes() == b"trades"
+
+
+def test_update_overwrites_only_previously_installed_mt5_ea(tmp_path):
+    appdata = tmp_path / "AppData" / "Roaming"
+    terminal = appdata / "MetaQuotes" / "Terminal" / "terminal-A"
+    installed = terminal / "MQL5" / "Experts" / "AITrader" / "AITrader.ex5"
+    installed.parent.mkdir(parents=True)
+    installed.write_bytes(b"old ea")
+    (appdata / "MetaQuotes" / "Terminal" / "terminal-B").mkdir()
+    root = tmp_path / "app"
+    stage = tmp_path / "stage"
+    (stage / "files" / "mql5").mkdir(parents=True)
+    (stage / "files" / "mql5" / "AITrader.ex5").write_bytes(b"new ea")
+    assert installed_ea_targets(appdata) == [installed]
+    assert install_stage(root, stage, installed_ea_targets(appdata)) == 1
+    assert installed.read_bytes() == b"new ea"
+    assert not (appdata / "MetaQuotes" / "Terminal" / "terminal-B" / "MQL5").exists()
+
+
+def test_old_updater_is_completed_by_new_setup_window(tmp_path):
+    appdata = tmp_path / "AppData" / "Roaming"
+    target = appdata / "MetaQuotes" / "Terminal" / "terminal-A" / "MQL5" / "Experts" / "AITrader" / "AITrader.ex5"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"old ea")
+    root = tmp_path / "app"
+    (root / "mql5").mkdir(parents=True)
+    (root / "mql5" / "AITrader.ex5").write_bytes(b"new ea")
+    assert sync_bundled_ea(root, appdata) == 1
+    assert target.read_bytes() == b"new ea"
+    assert sync_bundled_ea(root, appdata) == 0
 
 
 @pytest.mark.parametrize("name", ["ai-trader/../runtime/stop.request", "ai-trader/src\\evil.py",

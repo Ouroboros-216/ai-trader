@@ -105,31 +105,16 @@ class AccountRouter:
 
     @staticmethod
     def mapped_symbols(agent: Agent) -> tuple[dict[str, str], str]:
-        requested = [part.strip() for part in agent.cfg["ea"]["symbols"].split(",")]
-        mapping = {}
-        source = "設定值（待 EA 核對）"
         try:
-            discovered = catalog(agent)
-            if discovered:
-                mapping = account_mapping(discovered)
-                source = "券商商品清單" if (agent.bridge.root / "catalog.json").exists() else "EA 快照"
-        except (OSError, ValueError):
-            pass
-        try:
-            raw = agent.bridge.json("snapshot.json")
-            if (str(raw.get("account")) == agent.cfg["account"] and
-                raw.get("server") == agent.cfg["server"] and
-                raw.get("magic") == agent.cfg["magic"] and
-                raw.get("account_mode", "demo") == agent.cfg.get("account_mode", "demo") and
-                raw.get("demo") is (agent.cfg.get("account_mode", "demo") == "demo") and
-                not raw.get("missing_symbols") and len(raw.get("symbols", {})) == len(requested)):
-                mapping.update(zip(requested, raw["symbols"]))
-                return mapping, source if source == "券商商品清單" else "EA 快照"
+            snapshot = agent.snapshot()
         except (OSError, ValueError, KeyError, TypeError):
-            pass
-        if not mapping:
-            mapping = {name: name for name in requested}
-        return mapping, source
+            return {}, "EA 快照未就緒"
+        try:
+            discovered = catalog(agent, snapshot)
+            source = "市場報價商品清單" if (agent.bridge.root / "catalog.json").exists() else "EA 快照"
+            return account_mapping(discovered), source
+        except (OSError, ValueError):
+            return account_mapping(list(snapshot["symbols"])), "EA 快照"
 
     def draft_all(self, instruction: str) -> str:
         if not instruction.strip() or len(instruction) > 4000:

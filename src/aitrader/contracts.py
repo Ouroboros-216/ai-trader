@@ -33,7 +33,7 @@ class StrategyPolicy:
     title: str
     instructions: str
     direction: str = "BOTH"
-    symbols: list[str] = field(default_factory=lambda: ["XAUUSD", "EURUSD", "GBPUSD"])
+    symbols: list[str] = field(default_factory=list)
     timeframes: list[str] = field(default_factory=lambda: ["M5", "M15", "H1", "H4"])
     entry: str = ""
     invalidation: str = ""

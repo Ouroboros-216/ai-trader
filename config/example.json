@@ -7,10 +7,10 @@
   "live_enabled": false,
   "magic": 26092751,
   "ea": {
-    "symbols": "XAUUSD,EURUSD,GBPUSD",
+    "symbols": "AUTO",
     "commission_round_turn": "-1",
-    "max_spread_points": "80,25,30",
-    "slippage_points": "10,3,3"
+    "max_spread_points": "25",
+    "slippage_points": "3"
   },
   "provider": {
     "kind": "gemini",

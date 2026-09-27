@@ -20,7 +20,7 @@ from .provider import Gemini
 from .secrets import load_into_environment, read_secrets, save_secrets
 from .storage import ProcessLock, Store
 from .telegram import Telegram
-from .updater import current_version, latest_release, version_tuple
+from .updater import current_version, latest_release, sync_bundled_ea, version_tuple
 from .accounts import (load_profiles, new_profile_config, profile_id, profile_path,
                        read_registry, remove_profile, save_registry, write_mt5_index)
 
@@ -56,6 +56,10 @@ def valid_form(account: str, server: str, model: str, user_id: str):
 
 
 def valid_ea(symbols: str, commissions: str):
+    if symbols.strip().upper() == "AUTO":
+        if not re.fullmatch(r"-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", commissions.strip()) or float(commissions) < -1:
+            raise ValueError("市場報價自動模式的佣金須填一個數值；未知填 -1")
+        return "AUTO", commissions.strip()
     names = [s.strip() for s in symbols.split(",")]
     costs = [s.strip() for s in commissions.split(",")]
     if not 1 <= len(names) <= 10 or len(costs) not in {1, len(names)} or len(set(names)) != len(names):
@@ -83,7 +87,7 @@ def bridge_relative(value: str) -> str:
 
 def save_form(config_path: Path, account: str, server: str, model: str, user_id: str,
               gemini_ok: bool, telegram_ok: bool, new_key: str, new_token: str,
-              symbols: str = "XAUUSD,EURUSD,GBPUSD", commissions: str = "-1",
+              symbols: str = "AUTO", commissions: str = "-1",
               secrets_path: Path | None = None, account_mode: str = "demo", live_enabled: bool = False) -> dict:
     valid_form(account, server, model, user_id)
     if account_mode not in {"demo", "real"} or type(live_enabled) is not bool or (account_mode == "demo" and live_enabled):
@@ -106,12 +110,12 @@ def save_form(config_path: Path, account: str, server: str, model: str, user_id:
     config["live_enabled"] = live_enabled
     config.setdefault("ea", {})["symbols"] = symbols
     config["ea"]["commission_round_turn"] = commissions
-    config["ea"].setdefault("max_spread_points", "80,25,30")
-    config["ea"].setdefault("slippage_points", "10,3,3")
+    config["ea"].setdefault("max_spread_points", "25")
+    config["ea"].setdefault("slippage_points", "3")
     if len(symbols.split(",")) != len(config["ea"]["max_spread_points"].split(",")):
         config["ea"]["max_spread_points"] = ",".join("25" for _ in symbols.split(","))
     if len(symbols.split(",")) != len(config["ea"]["slippage_points"].split(",")):
-        config["ea"]["slippage_points"] = ",".join("10" for _ in symbols.split(","))
+        config["ea"]["slippage_points"] = ",".join("3" for _ in symbols.split(","))
     config["provider"]["model"] = model.strip()
     config["provider"]["enabled"] = bool(gemini_ok)
     config["telegram"]["user_id"] = int(user_id) if user_id else 0
@@ -150,7 +154,7 @@ class SetupWindow:
         self.vars = {
             "account": tk.StringVar(value=config.get("account", "")),
             "server": tk.StringVar(value=config.get("server", "")),
-            "symbols": tk.StringVar(value=config.get("ea", {}).get("symbols", "XAUUSD,EURUSD,GBPUSD")),
+            "symbols": tk.StringVar(value=config.get("ea", {}).get("symbols", "AUTO")),
             "commissions": tk.StringVar(value=config.get("ea", {}).get("commission_round_turn", "-1")),
             "account_mode": tk.StringVar(value="實盤" if config.get("account_mode", "demo") == "real" else "模擬"),
             "model": tk.StringVar(value=shared_config["provider"].get("model", "")),
@@ -163,7 +167,15 @@ class SetupWindow:
         self.verified_ids = [str(shared_config["telegram"].get("user_id"))] if self.telegram_ok else []
         self.saved_hint = {"gemini": bool(saved.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")),
                            "telegram": bool(saved.get("AI_TRADER_TELEGRAM_TOKEN") or os.environ.get("AI_TRADER_TELEGRAM_TOKEN"))}
-        self.status = tk.StringVar(value="先填資料，測試連線，最後按「儲存設定」。")
+        update_log = ROOT / "runtime" / "update.log"
+        startup_hint = update_log.read_text(encoding="utf-8").strip() if update_log.is_file() else ""
+        try:
+            ea_count = sync_bundled_ea(ROOT)
+            if ea_count:
+                startup_hint = f"已覆蓋 {ea_count} 個 MT5 EA 資料夾；請在每個 MT5 重新掛載 EA。"
+        except (OSError, ValueError) as exc:
+            startup_hint = "EX5 同步失敗：" + str(exc)[:140]
+        self.status = tk.StringVar(value=startup_hint or "先填資料，測試連線，最後按「儲存設定」。")
         self.account_choice = tk.StringVar(value=self.account_labels.get(self.selected_id, ""))
         self._build()
         for name in ("model", "gemini_key"):
@@ -192,7 +204,7 @@ class SetupWindow:
         ttk.Label(frame, text="帳戶類型").grid(row=4, column=0, sticky="w", padx=(0, 10), pady=5)
         self.mode_box = ttk.Combobox(frame, textvariable=self.vars["account_mode"], values=["模擬", "實盤"], state="readonly", width=16)
         self.mode_box.grid(row=4, column=1, sticky="w", pady=5)
-        ttk.Label(frame, text="交易商品由策略對話選擇；系統搜尋券商商品，遇到多個後綴會請你選擇。", wraplength=730).grid(row=6, column=0, columnspan=3, sticky="w", pady=5)
+        ttk.Label(frame, text="交易商品由 MT5『市場報價』手動顯示；EA 只分析這些商品，不會自動加入預設商品。", wraplength=730).grid(row=6, column=0, columnspan=3, sticky="w", pady=5)
         self._field(frame, 7, "每手開平合計佣金", "commissions")
         ttk.Label(frame, text="佣金填一個數值套用此帳戶全部商品；未知填 -1。可先接 MT5 再讀取券商規則。", wraplength=730).grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
@@ -494,8 +506,8 @@ class SetupWindow:
                 self.status.set("目前已是最新版（v" + local + "）。")
                 return
             if not messagebox.askyesno("安裝更新", "找到 v" + release["version"] + "（目前 v" + local + "）。\n\n"
-                                   "要下載並校驗 GitHub Release，停止服務、更新程式後自動重啟嗎？\n"
-                                   "本機帳號、金鑰與交易紀錄會保留。尚未儲存的欄位請先取消並儲存。"):
+                                   "要下載並校驗 GitHub Release，停止服務、更新程式與已安裝的 MT5 EX5 後自動重啟嗎？\n"
+                                   "更新後請在每個 MT5 重新掛載 EA。本機帳號、金鑰與交易紀錄會保留。尚未儲存的欄位請先取消並儲存。"):
                 self.status.set("已取消更新。")
                 return
             root = ROOT / "runtime"

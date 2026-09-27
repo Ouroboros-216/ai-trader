@@ -14,6 +14,8 @@ from .provider import ADAPTERS, build_provider
 from .storage import Store, dumps
 from .symbols import ambiguous_choice, catalog, relevant
 
+REQUIRED_EA_VERSION = "1.010"
+
 
 def load_config(path):
     path = Path(path).resolve()
@@ -134,6 +136,8 @@ class Agent:
 
     def draft(self, instruction, auto=False, per_trade=None, total=None):
         snapshot = self.snapshot()
+        if snapshot.get("ea_version") != REQUIRED_EA_VERSION:
+            raise ValueError("請先在 MT5 重新掛載 v1.010 EA，再建立策略")
         current = self.policy()
         # A strategy draft needs historical bars, not a live quote or known commission.
         # The latter are mandatory only when the account is resumed and an entry is sent.
@@ -149,7 +153,9 @@ class Agent:
                                for symbol, counts in list(bar_counts.items())[:5])
             raise ValueError("尚無商品同時具備至少 20 根 M15 和 H1 已完成 K 棒" +
                              ("（" + details + "）" if details else "（EA 尚未提供商品 K 棒）") +
-                             "；請在 MT5 開啟歷史行情後重試")
+                             "；請先在 MT5 市場報價顯示商品、開啟歷史行情後重試")
+        if not choices:
+            raise ValueError("MT5 市場報價沒有可分析的商品；請先手動顯示要交易的商品，等待 EA 更新行情")
         request = {"request": instruction, "current_policy": current.to_dict() if current else None,
                    "available_symbols": choices, "missing_symbols": snapshot.get("missing_symbols", [])}
         if auto:
@@ -211,6 +217,8 @@ class Agent:
             self.store.set("policy", p.to_dict())
         elif row["kind"] == "resume":
             snapshot = self.snapshot()
+            if snapshot.get("ea_version") != REQUIRED_EA_VERSION:
+                raise ValueError("請先在 MT5 重新掛載 v1.010 EA，再啟動新單")
             p = self.policy()
             if self.cfg.get("account_mode", "demo") == "real" and not self.cfg.get("live_enabled", False):
                 raise ValueError("此實盤帳號尚未授權自動新單")
@@ -335,6 +343,11 @@ class Agent:
                 self.store.db.execute("UPDATE commands SET status='cancelled' WHERE id=?", (row["id"],))
             return
         snapshot = self.snapshot()
+        if snapshot.get("ea_version") != REQUIRED_EA_VERSION and d["action"] in {"BUY", "SELL", "REVERSE"}:
+            with self.store.db:
+                self.store.db.execute("UPDATE commands SET status='cancelled' WHERE id=?", (row["id"],))
+            self.store.event("decision_blocked", {"reason": "EA version mismatch", "id": row["id"]})
+            return
         p = self.policy()
         if not p:
             return
@@ -378,9 +391,13 @@ class Agent:
         if self.store.db.execute("SELECT 1 FROM commands WHERE status IN ('queued','sent')").fetchone():
             return
         snapshot = self.snapshot()
+        if snapshot.get("ea_version") != REQUIRED_EA_VERSION:
+            return
         paused = self.store.get("paused", True)
         if paused and not any(x["owned"] for x in snapshot["positions"]):
             return
+        if set(p.symbols) - set(snapshot["symbols"]):
+            return  # Market Watch removal must not trigger an AI decision or new order.
         if snapshot.get("halted") or snapshot.get("state_ok") is not True:
             return
         now = time.time()
@@ -426,7 +443,11 @@ class Agent:
         p = self.policy()
         paused = self.store.get("paused", True)
         if p:
-            entries_allowed = not paused and (self.cfg.get("account_mode", "demo") == "demo" or self.cfg.get("live_enabled", False))
+            try:
+                ea_ready = self.snapshot().get("ea_version") == REQUIRED_EA_VERSION
+            except (ValueError, FileNotFoundError, OSError):
+                ea_ready = False
+            entries_allowed = ea_ready and not paused and (self.cfg.get("account_mode", "demo") == "demo" or self.cfg.get("live_enabled", False))
             self.bridge.csv("policy.csv", [1, self.cfg["account"], self.cfg["server"], self.cfg["magic"], p.version, int(time.time())+45,
                        int(entries_allowed), p.direction, p.risk_pct, p.total_risk_pct, p.daily_loss_pct, p.drawdown_pct,
                        "|".join(p.symbols), self.store.get("reset_nonce", 0), self.store.get("resume_nonce", 0)])

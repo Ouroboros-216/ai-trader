@@ -1,5 +1,5 @@
 #property strict
-#property version "1.009"
+#property version "1.010"
 #property description "Independent AI operator with exact account-mode binding. Python bridge required."
 
 // Self-contained execution wrapper: no terminal-local include dependency.
@@ -56,19 +56,19 @@ input string InpBridge="AITrader\\demo-1";
 input long InpDemoLogin=0;                 // 0 = bind to account login saved by setup window
 input string InpDemoServer="";             // empty = bind to server saved by setup window
 input ulong InpMagic=26092751;
-input string InpSymbols="XAUUSD,EURUSD,GBPUSD"; // exact names preferred; ambiguous suffixes block
+input string InpSymbols="AUTO"; // AUTO = only symbols manually visible in Market Watch; legacy names are cost overrides
 input string InpCommissionRoundTurn="-1"; // One value for all symbols, or comma-separated values per symbol
-input string InpMaxSpreadPoints="80,25,30";
-input string InpSlippagePoints="10,3,3";
+input string InpMaxSpreadPoints="25";
+input string InpSlippagePoints="3";
 input int InpBars=100;
 
 BrokerTrade trade;
 string syms[], requested[], missing="", commissions[], spreads[], slips[];
-string configured_syms[], configured_commissions[], configured_spreads[], configured_slips[], shared_commission="-1";
+string configured_syms[], configured_commissions[], configured_spreads[], configured_slips[], shared_commission="-1",shared_spread="25",shared_slip="3";
 string base, used[], status_text="Waiting for service", pending_id="none";
 string bound_account="",bound_server="",bound_mode="demo";
 bool live_allowed=false;
-int lock_handle=INVALID_HANDLE, n=0, policy_version=0, configured_n=0, symbols_version=-1, reset_nonce=0,resume_nonce=0;
+int lock_handle=INVALID_HANDLE, n=0, policy_version=0, configured_n=0, reset_nonce=0,resume_nonce=0;
 bool symbols_ready=false;
 int panel_page=0,panel_pages=1;
 long policy_expiry=0, daykey=0;
@@ -185,35 +185,52 @@ void Result(string id,string status,uint code,string detail,long latency_ms=0)
 }
 int SymbolIndex(string symbol) { for(int i=0;i<n;i++) if(syms[i]==symbol) return i; return -1; }
 bool PolicySymbol(string symbol) { return StringFind("|"+policy_symbols+"|","|"+symbol+"|")>=0; }
-bool ConfigurePolicySymbols()
+bool RefreshWatchlist()
 {
-   if(symbols_version==policy_version&&symbols_ready) return true;
-   string selected[]; int count=StringSplit(policy_symbols,'|',selected);
-   if(count<1||count>10) return false;
-   ArrayResize(syms,0); ArrayResize(requested,0); ArrayResize(commissions,0); ArrayResize(spreads,0); ArrayResize(slips,0);
-   n=0; missing=""; bool complete=true;
-   for(int i=0;i<count;i++)
+   ArrayResize(syms,0); ArrayResize(requested,0); ArrayResize(commissions,0);
+   ArrayResize(spreads,0); ArrayResize(slips,0);
+   n=0; missing="";
+   int total=SymbolsTotal(true);
+   for(int i=0;i<total;i++)
    {
-      string symbol=selected[i]; bool custom=false;
-      if(!SafeToken(symbol)||!SymbolExist(symbol,custom)||!SymbolSelect(symbol,true))
+      string symbol=SymbolName(i,true);
+      if(!SafeToken(symbol)||!SymbolInfoInteger(symbol,SYMBOL_VISIBLE)||
+         SymbolInfoInteger(symbol,SYMBOL_TRADE_MODE)==SYMBOL_TRADE_MODE_DISABLED) continue;
+      if(n>=10)
       {
-         complete=false;
-         if(missing!="") missing+=",";
-         missing+=J(symbol+": unavailable broker symbol");
-         continue;
+         ArrayResize(syms,0); ArrayResize(requested,0); ArrayResize(commissions,0);
+         ArrayResize(spreads,0); ArrayResize(slips,0); n=0;
+         missing=J("Market Watch has more than 10 visible tradable symbols; hide extras");
+         return false;
       }
-      if(SymbolIndex(symbol)>=0) { complete=false; continue; }
       int source=-1;
       for(int j=0;j<configured_n;j++) if(configured_syms[j]==symbol) { source=j; break; }
       ArrayResize(syms,n+1); ArrayResize(requested,n+1); ArrayResize(commissions,n+1);
       ArrayResize(spreads,n+1); ArrayResize(slips,n+1);
       syms[n]=symbol; requested[n]=symbol;
       commissions[n]=source>=0?configured_commissions[source]:shared_commission;
-      spreads[n]=source>=0?configured_spreads[source]:"25";
-      slips[n]=source>=0?configured_slips[source]:"10";
+      spreads[n]=source>=0?configured_spreads[source]:shared_spread;
+      slips[n]=source>=0?configured_slips[source]:shared_slip;
       n++;
    }
-   symbols_version=policy_version; symbols_ready=complete&&n==count;
+   return n>0;
+}
+bool ConfigurePolicySymbols()
+{
+   string selected[]; int count=StringSplit(policy_symbols,'|',selected);
+   if(count<1||count>10||n<1) { symbols_ready=false; return false; }
+   bool complete=true;
+   for(int i=0;i<count;i++)
+   {
+      string symbol=selected[i];
+      if(!SafeToken(symbol)||SymbolIndex(symbol)<0)
+      {
+         complete=false;
+         if(missing!="") missing+=",";
+         missing+=J(symbol+": not visible in Market Watch");
+      }
+   }
+   symbols_ready=complete;
    return symbols_ready;
 }
 bool AccountMatched()
@@ -443,7 +460,7 @@ string Bars(string symbol,ENUM_TIMEFRAMES tf,bool &ready)
 }
 void Snapshot()
 {
-   string out="{\"schema\":1,\"account\":"+J(Account())+",\"server\":"+J(Server())+",\"magic\":"+(string)InpMagic+",\"demo\":"+Bool(IsDemo())+",\"account_mode\":"+J(bound_mode)+",\"live_enabled\":"+Bool(live_allowed)+",\"time\":"+(string)Now()+",\"equity\":"+Num(AccountInfoDouble(ACCOUNT_EQUITY))+",\"balance\":"+Num(AccountInfoDouble(ACCOUNT_BALANCE))+",\"currency\":"+J(AccountInfoString(ACCOUNT_CURRENCY))+",\"state_ok\":"+Bool(state_ok)+",\"halted\":"+Bool(daily_halt||total_halt||!state_ok)+",\"local_pause\":"+Bool(local_pause)+",\"missing_symbols\":["+missing+"],\"positions\":[";
+   string out="{\"schema\":1,\"ea_version\":\"1.010\",\"account\":"+J(Account())+",\"server\":"+J(Server())+",\"magic\":"+(string)InpMagic+",\"demo\":"+Bool(IsDemo())+",\"account_mode\":"+J(bound_mode)+",\"live_enabled\":"+Bool(live_allowed)+",\"time\":"+(string)Now()+",\"equity\":"+Num(AccountInfoDouble(ACCOUNT_EQUITY))+",\"balance\":"+Num(AccountInfoDouble(ACCOUNT_BALANCE))+",\"currency\":"+J(AccountInfoString(ACCOUNT_CURRENCY))+",\"state_ok\":"+Bool(state_ok)+",\"halted\":"+Bool(daily_halt||total_halt||!state_ok)+",\"local_pause\":"+Bool(local_pause)+",\"missing_symbols\":["+missing+"],\"positions\":[";
    int count=0;
    for(int i=0;i<PositionsTotal();i++)
    {
@@ -471,10 +488,9 @@ void Catalog()
 {
    string out="{\"account\":"+J(Account())+",\"server\":"+J(Server())+",\"magic\":"+(string)InpMagic+",\"demo\":"+Bool(IsDemo())+",\"account_mode\":"+J(bound_mode)+",\"time\":"+(string)Now()+",\"symbols\":[";
    int added=0;
-   for(int i=0;i<SymbolsTotal(false);i++)
+   for(int i=0;i<n;i++)
    {
-      string symbol=SymbolName(i,false);
-      if(!SafeToken(symbol)||SymbolInfoInteger(symbol,SYMBOL_TRADE_MODE)==SYMBOL_TRADE_MODE_DISABLED) continue;
+      string symbol=syms[i];
       if(added++>0) out+=",";
       out+=J(symbol);
    }
@@ -667,39 +683,48 @@ int OnInit()
    for(int c=0;c<StringLen(Server());c++) server_hash=(server_hash*131+StringGetCharacter(Server(),c))%2147483647;
    lock_handle=FileOpen("AITrader-account-"+Account()+"-"+(string)server_hash+"-"+(string)InpMagic+".lock",FILE_WRITE|FILE_BIN|FILE_COMMON);
    if(lock_handle==INVALID_HANDLE) { Print("Another AITrader EA owns this account/magic"); return INIT_FAILED; }
-   n=StringSplit(selected_symbols,',',requested);
+   configured_n=selected_symbols=="AUTO"?0:StringSplit(selected_symbols,',',requested);
    int commission_count=StringSplit(selected_commissions,',',commissions);
    int spread_count=StringSplit(selected_spreads,',',spreads);
    int slip_count=StringSplit(selected_slips,',',slips);
-   if(n<1||n>10||(commission_count!=1&&commission_count!=n)||spread_count!=n||slip_count!=n)
-      return InitFailure("List counts: symbols="+(string)n+", commission="+(string)commission_count+", spread="+(string)spread_count+", slippage="+(string)slip_count);
-   if(commission_count==1&&n>1) { string single=commissions[0]; ArrayResize(commissions,n); for(int i=1;i<n;i++) commissions[i]=single; }
+   if(configured_n<0||configured_n>10||(commission_count!=1&&commission_count!=configured_n)||
+      (spread_count!=1&&spread_count!=configured_n)||(slip_count!=1&&slip_count!=configured_n)||
+      (configured_n==0&&(commission_count!=1||spread_count!=1||slip_count!=1)))
+      return InitFailure("Cost override counts: symbols="+(string)configured_n+", commission="+(string)commission_count+", spread="+(string)spread_count+", slippage="+(string)slip_count);
+   for(int i=0;i<commission_count;i++) if(!DecimalNumber(commissions[i],true)||StringToDouble(commissions[i])<-1) return InitFailure("Invalid commission override");
+   for(int i=0;i<spread_count;i++) if(!DecimalNumber(spreads[i])||StringToDouble(spreads[i])<=0) return InitFailure("Invalid max spread override");
+   for(int i=0;i<slip_count;i++) if(!DigitsOnly(slips[i])) return InitFailure("Invalid slippage override");
    if(commission_count==1) shared_commission=commissions[0];
-   ArrayResize(syms,n);
-   for(int i=0;i<n;i++)
+   shared_spread=spreads[0]; shared_slip=slips[0];
+   for(int i=1;i<spread_count;i++) if(StringToDouble(spreads[i])<StringToDouble(shared_spread)) shared_spread=spreads[i];
+   for(int i=1;i<slip_count;i++) if(StringToDouble(slips[i])<StringToDouble(shared_slip)) shared_slip=slips[i];
+   if(configured_n>0)
+   {
+      if(commission_count==1) { string value=commissions[0]; ArrayResize(commissions,configured_n); for(int i=0;i<configured_n;i++) commissions[i]=value; }
+      if(spread_count==1) { string value=spreads[0]; ArrayResize(spreads,configured_n); for(int i=0;i<configured_n;i++) spreads[i]=value; }
+      if(slip_count==1) { string value=slips[0]; ArrayResize(slips,configured_n); for(int i=0;i<configured_n;i++) slips[i]=value; }
+   }
+   ArrayResize(configured_syms,configured_n);
+   for(int i=0;i<configured_n;i++)
    {
       string wanted=requested[i]; StringTrimLeft(wanted); StringTrimRight(wanted);
-      if(!SafeToken(wanted)||!DecimalNumber(commissions[i],true)||!DecimalNumber(spreads[i])||!DigitsOnly(slips[i])||StringToDouble(spreads[i])<=0||StringToDouble(slips[i])<0)
-         return InitFailure("Invalid symbol/cost/spread/slippage at item "+(string)(i+1));
-      int matches=0; string match="";
-      bool custom=false;
+      if(!SafeToken(wanted)) return InitFailure("Invalid cost override symbol at item "+(string)(i+1));
+      int matches=0; string match=""; bool custom=false;
       if(SymbolExist(wanted,custom)) { match=wanted; matches=1; }
       else for(int j=0;j<SymbolsTotal(false);j++) { string candidate=SymbolName(j,false); if(StringFind(candidate,wanted)==0) { matches++; match=candidate; } }
-      if(matches==1&&SafeToken(match)&&SymbolSelect(match,true)) syms[i]=match;
-      else { syms[i]=""; if(missing!="") missing+=","; missing+=J(wanted+": missing or ambiguous, configure exact symbol"); }
-      for(int j=0;j<i;j++) if(syms[i]!=""&&syms[i]==syms[j]) return InitFailure("Two requested symbols map to one broker symbol: "+syms[i]);
+      configured_syms[i]=matches==1&&SafeToken(match)?match:"";
+      for(int j=0;j<i;j++) if(configured_syms[i]!=""&&configured_syms[i]==configured_syms[j]) return InitFailure("Two cost overrides map to one broker symbol: "+configured_syms[i]);
    }
-   configured_n=n;
-   ArrayCopy(configured_syms,syms); ArrayCopy(configured_commissions,commissions);
+   ArrayCopy(configured_commissions,commissions);
    ArrayCopy(configured_spreads,spreads); ArrayCopy(configured_slips,slips);
    trade.SetExpertMagicNumber(InpMagic); trade.SetAsyncMode(false); trade.SetDeviationInPoints(10);
-   LoadState(); LoadUsed(); ReadPolicy(); Protect(); Snapshot(); Catalog(); Panel(); ExportDeals();
+   LoadState(); LoadUsed(); RefreshWatchlist(); ReadPolicy(); Protect(); Snapshot(); Catalog(); Panel(); ExportDeals();
    EventSetTimer(1); return INIT_SUCCEEDED;
 }
 void OnTimer()
 {
    if(!AccountMatched()) { enabled=false; return; }
-   ReadPolicy(); Protect(); Command();
+   RefreshWatchlist(); ReadPolicy(); Protect(); Command();
    ulong now=GetTickCount64();
    if(now-last_snapshot>=5000) { Snapshot(); last_snapshot=now; }
    if(now-last_catalog>=60000) { Catalog(); last_catalog=now; }
