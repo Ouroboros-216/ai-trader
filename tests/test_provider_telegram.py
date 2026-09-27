@@ -1,4 +1,5 @@
 import json
+import io
 import time
 import urllib.error
 
@@ -168,6 +169,37 @@ def test_openai_http_error_does_not_expose_key_or_body(agent, monkeypatch):
         OpenAI(cfg, agent.store, fail).call("chat", {})
     assert "private-key" not in str(failure.value)
     assert agent.store.get("provider_backoff_until") > time.time()
+
+
+def test_openai_400_reports_only_safe_machine_fields(agent, monkeypatch):
+    monkeypatch.setenv("FAKE_OPENAI_KEY", "private-key")
+    cfg = {"kind": "openai", "enabled": True, "model": "gpt-5.4", "api_key_env": "FAKE_OPENAI_KEY",
+           "timeout_seconds": 10, "max_calls_per_day": 10, "min_interval_seconds": 0, "max_output_tokens": 1000}
+    def fail(*_):
+        body = {"error": {"param": "max_output_tokens", "code": "unsupported_parameter",
+                          "message": "private-key and confidential market data"}}
+        raise urllib.error.HTTPError("https://example.test/private-key", 400, "secret", {}, io.BytesIO(json.dumps(body).encode()))
+    with pytest.raises(ValueError) as failure:
+        OpenAI(cfg, agent.store, fail).call("chat", {})
+    assert "參數=max_output_tokens" in str(failure.value)
+    assert "代碼=unsupported_parameter" in str(failure.value)
+    assert "private-key" not in str(failure.value)
+    assert "confidential market data" not in str(failure.value)
+
+
+def test_openai_json_mode_rejection_retries_once_without_format(agent, monkeypatch):
+    monkeypatch.setenv("FAKE_OPENAI_KEY", "private-key")
+    cfg = {"kind": "openai", "enabled": True, "model": "gpt-5.4", "api_key_env": "FAKE_OPENAI_KEY",
+           "timeout_seconds": 10, "max_calls_per_day": 10, "min_interval_seconds": 0, "max_output_tokens": 1000}
+    requests = []
+    def transport(_, body, *__):
+        requests.append(body.copy())
+        if len(requests) == 1:
+            detail = {"error": {"param": "text.format.type", "code": "unsupported_parameter"}}
+            raise urllib.error.HTTPError("https://example.test", 400, "bad format", {}, io.BytesIO(json.dumps(detail).encode()))
+        return {"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": '{"answer":"ok"}'}]}]}
+    assert OpenAI(cfg, agent.store, transport).call("chat", {}) == {"answer": "ok"}
+    assert len(requests) == 2 and "text" in requests[0] and "text" not in requests[1]
 
 
 @pytest.mark.parametrize("sender,chat,chat_type,age,accepted", [(7,7,"private",0,True), (8,7,"private",0,False), (7,8,"private",0,False), (7,7,"group",0,False), (7,7,"private",500,False)])

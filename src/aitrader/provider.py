@@ -33,6 +33,22 @@ def safe_http_error(code: int) -> str:
     return "Gemini HTTP " + str(code) + "：" + HTTP_HINTS.get(code, "請在 AI Studio 核對模型、金鑰與專案狀態。")
 
 
+def openai_error_fields(exc: urllib.error.HTTPError) -> tuple[str, str]:
+    """Read only documented machine fields; never echo a remote error message/body."""
+    try:
+        raw = exc.read(4097)
+        if len(raw) > 4096:
+            return "", ""
+        error = json.loads(raw).get("error", {})
+        if not isinstance(error, dict):
+            return "", ""
+        param, code = error.get("param"), error.get("code")
+        safe = lambda value: value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.\[\]-]{1,80}", value) else ""
+        return safe(param), safe(code)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return "", ""
+
+
 class ProviderResponseError(ValueError):
     """A fixed, safe diagnosis of an unusable model response."""
 
@@ -201,13 +217,24 @@ class OpenAI:
         call_id = self.quota_store.reserve_call(kind, cfg, now)
         prompts = {"strategy": STRATEGY, "decisions": DECISIONS,
                    "chat": '只讀查詢。根據提供的實際狀態回答，不提出操作。回覆 {"answer":"..."}。'}
+        http_fields = ("", "")
         try:
-            raw = self.transport(
-                "https://api.openai.com/v1/responses",
-                {"model": cfg["model"], "instructions": SYSTEM + "\n" + prompts[kind],
-                 "input": dumps(payload), "text": {"format": {"type": "json_object"}},
-                 "max_output_tokens": cfg["max_output_tokens"], "store": False},
-                {"Authorization": "Bearer " + key}, cfg["timeout_seconds"])
+            body = {"model": cfg["model"], "instructions": SYSTEM + "\n" + prompts[kind],
+                    "input": dumps(payload), "text": {"format": {"type": "json_object"}},
+                    "max_output_tokens": cfg["max_output_tokens"], "store": False}
+            endpoint = "https://api.openai.com/v1/responses"
+            headers = {"Authorization": "Bearer " + key}
+            try:
+                raw = self.transport(endpoint, body, headers, cfg["timeout_seconds"])
+            except urllib.error.HTTPError as api_error:
+                http_fields = openai_error_fields(api_error)
+                if api_error.code != 400 or not http_fields[0].startswith("text.format"):
+                    raise
+                # Some model variants reject JSON mode. The existing JSON parser and
+                # decision validators still fail closed if plain text is unsuitable.
+                body.pop("text")
+                http_fields = ("", "")
+                raw = self.transport(endpoint, body, headers, cfg["timeout_seconds"])
             if not isinstance(raw, dict):
                 raise ProviderResponseError("invalid_response", "OpenAI 回答格式不符；本次未採用。")
             if raw.get("status") != "completed":
@@ -248,10 +275,13 @@ class OpenAI:
             message = "OpenAI API 暫時無法使用；本次未採用。"
             if isinstance(exc, urllib.error.HTTPError):
                 error = "http_" + str(exc.code)
+                param, code = http_fields if any(http_fields) else openai_error_fields(exc)
                 hints = {400: "請求參數或模型不被接受", 401: "API key 無效", 403: "專案沒有此模型的使用權限",
                          404: "模型 ID 不存在或端點無法使用", 429: "配額或限流", 500: "服務端暫時出錯",
                          503: "服務暫時不可用"}
                 message = "OpenAI HTTP " + str(exc.code) + "：" + hints.get(exc.code, "請檢查模型、金鑰與專案") + "。"
+                if param or code:
+                    message += "參數=" + (param or "無") + "；代碼=" + (code or "無") + "。"
                 if exc.code == 429:
                     self.quota_store.set("provider_backoff_until", time.time()+900)
                     error = "rate_limited"
