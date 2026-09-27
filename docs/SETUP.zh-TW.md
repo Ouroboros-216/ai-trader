@@ -2,7 +2,7 @@
 
 ## 最快設定方式：直接用視窗
 
-解壓縮新版 `AITrader-v0.8.5.zip`，進入其中的 `ai-trader` 資料夾，**雙擊 `開啟設定.cmd`**。第一次會自動安裝本專案的獨立 Python 環境（不下載套件）；設定視窗開啟後 CMD 會關閉。在視窗填帳號、完整伺服器名稱，選「模擬／實盤」，再填 Gemini 模型 ID／API key、飛機 bot token。按「測試 Gemini」，向自己的 bot 傳 `/start` 後按「讀取飛機 ID」，從清單選自己的 ID，再按「儲存設定」。通過測試的連線會自動設為 enabled，不需手改 `true`。
+解壓縮新版 `AITrader-v0.8.6.zip`，進入其中的 `ai-trader` 資料夾，**雙擊 `開啟設定.cmd`**。第一次會自動安裝本專案的獨立 Python 環境（不下載套件）；設定視窗開啟後 CMD 會關閉。在視窗填帳號、完整伺服器名稱，選「模擬／實盤」，再填 Gemini 模型 ID／API key、飛機 bot token。按「測試 Gemini」，向自己的 bot 傳 `/start` 後按「讀取飛機 ID」，從清單選自己的 ID，再按「儲存設定」。通過測試的連線會自動設為 enabled，不需手改 `true`。
 
 金鑰不寫進 `local.json`；視窗會用 Windows 目前使用者的 DPAPI 加密存入 `config/secrets.bin`。這個檔案不在 ZIP 裡，也無法在另一個 Windows 使用者帳戶直接解密。若原本已填好 `local.json`，新版壓縮包不會覆蓋它。
 
@@ -215,6 +215,8 @@ Telegram 傳 `帳號` 列出清單，直接傳帳號數字（例如 `53070196`�
 從 v0.8.4 起，設定視窗有「檢查更新」。按下後會查詢公開 GitHub Release；若有新版，確認一次即會下載 ZIP 與 SHA-256、校驗檔案、停止正在運行的服務、更新程式並重開設定視窗。原 `config/local.json`、`config/secrets.bin`、`runtime` 與 `.venv` 不會被覆蓋；若服務原本在運行，更新後會自動重啟。更新結果寫在 `runtime/update.log`，詳細程序輸出在 `runtime/update.err.log`。請先儲存設定視窗尚未儲存的修改。v0.8.3 尚無此按鈕，需最後一次手動覆蓋 v0.8.4；往後使用按鈕。若新版包含 EA 原始碼變更，仍須依發行說明重新編譯並掛載 EA。
 
 v0.8.5 起，若 Gemini 已回應但內容無法採用，飛機會區分「輸出 token 上限」、「回答被阻擋」、「空回答」和「JSON 格式錯誤」，本機呼叫紀錄也會記下對應代碼。這些情況都不會產生新下單指令。Gemini 3.5 Flash 的預設思考會消耗部分輸出 token；看到 `max_tokens` 才需考慮調整回應上限，單次 `ValueError` 後下一次成功並不能判定原因。
+
+v0.8.6 起，飛機回覆的帳號標題、錯誤提示、交易回報與帳號清單顯示「券商伺服器｜帳號」，例如 `VantageMarkets-Demo｜26091375`。舊的 `demo-...` 代碼仍可用於選帳號，但只是內部識別，不再顯示在一般回覆標題。
 
 在 Telegram 傳：
 

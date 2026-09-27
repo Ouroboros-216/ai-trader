@@ -32,6 +32,10 @@ class AccountRouter:
     def __init__(self, agents: dict[str, Agent], store: Store):
         self.agents, self.store = agents, store
 
+    def account_label(self, identifier: str) -> str:
+        cfg = self.agents[identifier].cfg
+        return cfg["server"] + "｜" + cfg["account"]
+
     def selected(self):
         identifier = self.store.get("selected_account", "")
         if identifier == "__none__":
@@ -77,7 +81,7 @@ class AccountRouter:
 
     def reply_markup(self, command: str, reply: str, pending: str) -> dict:
         if command in {"帳號", "/accounts", "/start", "返回", "/back"} or not self.selected():
-            rows = [[{"text": agent.cfg["account"] + " @ " + agent.cfg["server"] + (" [實盤]" if agent.cfg.get("account_mode") == "real" else ""),
+            rows = [[{"text": self.account_label(identifier) + (" [實盤]" if agent.cfg.get("account_mode") == "real" else ""),
                       "callback_data": "a:" + self.account_token(identifier)}]
                     for identifier, agent in self.agents.items()]
             if pending and pending in reply and self.store.get("pending_account") == "__all__":
@@ -169,7 +173,7 @@ class AccountRouter:
         for item in plan:
             p = item["policy"]
             mode = "[實盤]" if self.agents[item["account_id"]].cfg.get("account_mode") == "real" else "[模擬]"
-            lines.append(item["account_id"]+mode+"：商品="+",".join(p["symbols"])+"；映射="+item["symbol_source"]+
+            lines.append(self.account_label(item["account_id"])+mode+"：商品="+",".join(p["symbols"])+"；映射="+item["symbol_source"]+
                          "；版本="+str(p["version"])+"；單筆/總風險="+str(p["risk_pct"])+"%/"+str(p["total_risk_pct"])+"%")
         if len("\n".join(lines)) > 13500:
             raise ValueError("全部策略卡過長，請縮短規則或分組設定帳號")
@@ -193,17 +197,17 @@ class AccountRouter:
         for item in plan:
             agent = self.agents[item["account_id"]]
             if agent.version() != item["base_version"]:
-                raise ValueError(item["account_id"]+" 策略版本已變，請重新建立草案")
+                raise ValueError(self.account_label(item["account_id"])+" 策略版本已變，請重新建立草案")
             StrategyPolicy.parse(item["policy"], item["base_version"]+1)
             if agent.store.db.execute("SELECT 1 FROM commands WHERE status IN ('queued','sent')").fetchone():
-                raise ValueError(item["account_id"]+" 尚有待執行指令，不能批量改策略")
+                raise ValueError(self.account_label(item["account_id"])+" 尚有待執行指令，不能批量改策略")
             if agent.policy():
                 try:
                     snapshot = agent.snapshot()
                 except (OSError, ValueError) as exc:
-                    raise ValueError(item["account_id"]+" 既有策略帳號的 EA 快照未就緒；先連線再批量改策略") from None
+                    raise ValueError(self.account_label(item["account_id"])+" 既有策略帳號的 EA 快照未就緒；先連線再批量改策略") from None
                 if any(position["owned"] for position in snapshot["positions"]):
-                    raise ValueError(item["account_id"]+" 有本系統持倉，先平倉後再批量改策略")
+                    raise ValueError(self.account_label(item["account_id"])+" 有本系統持倉，先平倉後再批量改策略")
         with self.store.db:
             self.store.db.execute("UPDATE proposals SET status='applying' WHERE id=? AND status='pending'", (proposal,))
         applied = []
@@ -225,7 +229,7 @@ class AccountRouter:
                     pass
             with self.store.db:
                 self.store.db.execute("UPDATE proposals SET status='partial' WHERE id=?", (proposal,))
-            raise ValueError("批量套用中斷；已套用帳號："+",".join(applied)+"。所有帳號請保持暫停並核對策略") from None
+            raise ValueError("批量套用中斷；已套用帳號："+",".join(self.account_label(i) for i in applied)+"。所有帳號請保持暫停並核對策略") from None
         with self.store.db:
             self.store.db.execute("UPDATE proposals SET status='confirmed' WHERE id=?", (proposal,))
         self.store.set("pending", "")
@@ -236,10 +240,10 @@ class AccountRouter:
         matches = []
         for identifier, agent in self.agents.items():
             display = identifier + "：" + agent.cfg["account"] + " @ " + agent.cfg["server"]
-            if value in {identifier, agent.cfg["account"], agent.cfg["server"], display}:
+            if value in {identifier, agent.cfg["account"], agent.cfg["server"], display, self.account_label(identifier)}:
                 matches.append(identifier)
         if len(matches) > 1:
-            raise ValueError("帳號或伺服器不唯一；請回覆清單中的完整 demo-... 代碼")
+            raise ValueError("帳號或伺服器不唯一；請點清單按鈕或回覆完整『券商｜帳號』")
         return matches[0] if matches else ""
 
     def handle(self, message: str) -> str:
@@ -254,7 +258,7 @@ class AccountRouter:
             rows = []
             for identifier, agent in self.agents.items():
                 marker = "→ " if self.selected() == identifier else "  "
-                rows.append(marker + identifier + "：" + agent.cfg["account"] + " @ " + agent.cfg["server"] +
+                rows.append(marker + self.account_label(identifier) +
                             (" [實盤]" if agent.cfg.get("account_mode") == "real" else ""))
             return "可用帳號：\n" + "\n".join(rows) + "\n點下方帳號，或直接回覆帳號數字。"
         if message in {"返回", "/back"}:
@@ -272,7 +276,7 @@ class AccountRouter:
             self.store.set("selected_account", identifier)
             self.store.set("pending", "")
             self.store.set("pending_account", "")
-            return "已選擇 " + identifier + "（" + self.agents[identifier].cfg["account"] + "）。可點下方指令；按『返回帳號清單』可退出。"
+            return "已選擇 " + self.account_label(identifier) + "。可點下方指令；按『返回帳號清單』可退出。"
         identifier = self.selected()
         if message.startswith("確認 ") and "|" in message:
             routed, proposal = message[3:].strip().split("|", 1)
@@ -281,21 +285,21 @@ class AccountRouter:
             identifier = self.account_from_token(routed)
             message = "確認 " + proposal
         if not identifier:
-            return "請先傳『帳號』查看清單，再直接回覆帳號數字或 demo-... 代碼。"
+            return "請先傳『帳號』查看清單，再點帳號按鈕或回覆帳號數字。"
         if message in {"策略", "/strategy"}:
-            return "【" + identifier + "】\n傳『策略 你的交易規則』建立待確認策略卡；例如『策略 用 SMC 只做空』。"
+            return "【" + self.account_label(identifier) + "】\n傳『策略 你的交易規則』建立待確認策略卡；例如『策略 用 SMC 只做空』。"
         agent = self.agents[identifier]
         try:
             reply = agent.handle(message)
         except ValueError as exc:
-            raise ValueError("帳號 " + identifier + "：" + str(exc)) from None
+            raise ValueError("帳號 " + self.account_label(identifier) + "：" + str(exc)) from None
         pending = agent.store.get("pending", "")
         if pending and pending in reply:
             self.store.set("pending", pending)
             self.store.set("pending_account", identifier)
         else:
             self.store.set("pending", "")
-        return "【" + identifier + "】\n" + reply
+        return "【" + self.account_label(identifier) + "】\n" + reply
 
 
 class MultiTelegram(Telegram):
@@ -325,7 +329,7 @@ class MultiTelegram(Telegram):
             cursor = store.get("telegram_event_cursor", 0)
             rows = store.db.execute("SELECT * FROM events WHERE id>? AND kind IN ('execution','uncertain') ORDER BY id LIMIT 5", (cursor,)).fetchall()
             for row in rows:
-                self.call("sendMessage", {"chat_id": self.config["chat_id"], "text": "【" + identifier + "】交易回報：" + row["data"][:2900]})
+                self.call("sendMessage", {"chat_id": self.config["chat_id"], "text": "【" + self.agent.account_label(identifier) + "】交易回報：" + row["data"][:2900]})
                 store.set("telegram_event_cursor", row["id"])
 
 

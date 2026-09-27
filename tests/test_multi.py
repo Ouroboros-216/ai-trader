@@ -142,7 +142,7 @@ def test_telegram_router_keeps_account_with_confirmation(tmp_path):
 def test_router_error_identifies_account(tmp_path):
     agent = FakeAgent("101", tmp_path / "a.sqlite")
     router = AccountRouter({"demo-a": agent}, Store(tmp_path / "router.sqlite"))
-    with pytest.raises(ValueError, match="帳號 demo-a：MT5 快照已過期"):
+    with pytest.raises(ValueError, match="帳號 Demo｜101：MT5 快照已過期"):
         router.handle("狀態")
 
 
@@ -150,11 +150,12 @@ def test_router_accepts_bare_account_number_alias_server_and_row(tmp_path):
     a, b = FakeAgent("101", tmp_path / "a.sqlite"), FakeAgent("202", tmp_path / "b.sqlite")
     a.cfg["server"], b.cfg["server"] = "Broker-A", "Broker-B"
     router = AccountRouter({"demo-a": a, "demo-b": b}, Store(tmp_path / "router.sqlite"))
-    assert "已選擇 demo-a" in router.handle("101")
-    assert "已選擇 demo-b" in router.handle("demo-b")
-    assert "已選擇 demo-a" in router.handle("Broker-A")
-    assert "已選擇 demo-b" in router.handle("demo-b：202 @ Broker-B")
-    assert "→ demo-b" in router.handle("帳號")
+    assert "已選擇 Broker-A｜101" in router.handle("101")
+    assert "已選擇 Broker-B｜202" in router.handle("demo-b")
+    assert "已選擇 Broker-A｜101" in router.handle("Broker-A")
+    assert "已選擇 Broker-B｜202" in router.handle("demo-b：202 @ Broker-B")
+    assert "已選擇 Broker-B｜202" in router.handle("Broker-B｜202")
+    assert "→ Broker-B｜202" in router.handle("帳號")
 
 
 def test_router_rejects_ambiguous_bare_account(tmp_path):
@@ -170,14 +171,14 @@ def test_chinese_account_menu_and_back_remove_scope(tmp_path):
     router = AccountRouter({"demo-a": a, "demo-b": b}, Store(tmp_path / "router.sqlite"))
     opening = router.handle("帳號")
     choices = router.reply_markup("帳號", opening, "")["inline_keyboard"]
-    assert [row[0]["text"] for row in choices] == ["101 @ Demo", "202 @ Demo"]
+    assert [row[0]["text"] for row in choices] == ["Demo｜101", "Demo｜202"]
     select = router.callback_message(choices[0][0]["callback_data"])
     selected = router.handle(select)
     labels = [button["text"] for row in router.reply_markup(select, selected, "")["inline_keyboard"] for button in row]
     assert labels == ["狀態", "持倉", "原因", "策略", "自動模式", "全部策略", "暫停", "啟動", "平倉", "重設回撤", "返回帳號清單"]
     auto = next(button["callback_data"] for row in router.reply_markup(select, selected, "")["inline_keyboard"]
                 for button in row if button["text"] == "自動模式")
-    assert router.handle(router.callback_message(auto)) == "【demo-a】\nok"
+    assert router.handle(router.callback_message(auto)) == "【Demo｜101】\nok"
     assert a.messages[-1] == "自動模式" and not b.messages
     back = router.reply_markup(select, selected, "")["inline_keyboard"][-1][0]["callback_data"]
     assert router.callback_message(back) == "返回"
@@ -233,7 +234,7 @@ def test_telegram_menu_callback_and_private_chinese_slash_descriptions(tmp_path,
     assert sent[0][1]["scope"] == {"type": "chat", "chat_id": 7}
     assert all(command["description"] for command in sent[0][1]["commands"])
     bot.poll()
-    assert sent[-1][1]["reply_markup"]["inline_keyboard"][0][0]["text"] == "101 @ Demo"
+    assert sent[-1][1]["reply_markup"]["inline_keyboard"][0][0]["text"] == "Demo｜101"
     bot.poll()
     assert router.selected() == "demo-a"
     menu = next(body for method, body in sent if method == "sendMessage" and "已選擇" in body["text"])
