@@ -16,7 +16,7 @@ from tkinter import messagebox, ttk
 
 from .bridge import Bridge, atomic_write
 from .contracts import MarketSnapshot
-from .provider import ADAPTERS, build_provider
+from .provider import ADAPTERS, OpenAI, build_provider
 from .secrets import load_into_environment, read_secrets, save_secrets
 from .storage import ProcessLock, Store
 from .telegram import Telegram
@@ -359,7 +359,8 @@ class SetupWindow:
             cfg = initial_config()["provider"] | {"kind": kind, "model": model, "enabled": True, "api_key_env": key_env}
             store = Store(ROOT / "runtime" / ("shared-openai-api.sqlite" if kind == "openai" else "shared-api.sqlite"))
             try:
-                result = build_provider(cfg, store).call("chat", {"question": "請回覆連線成功。沒有行情資料，不作交易判斷。"})
+                client = OpenAI(cfg, store, diagnostic=True) if kind == "openai" else build_provider(cfg, store)
+                result = client.call("chat", {"question": "請回覆連線成功。沒有行情資料，不作交易判斷。"})
                 if not isinstance(result.get("answer"), str) or not result["answer"].strip():
                     raise ValueError("沒有有效回答")
                 return kind, model

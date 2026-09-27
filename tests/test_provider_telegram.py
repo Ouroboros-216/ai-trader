@@ -140,6 +140,7 @@ def test_openai_responses_adapter_is_stateless_and_records_usage(agent, monkeypa
     url, body, headers, timeout = requests[0]
     assert url == "https://api.openai.com/v1/responses"
     assert body["store"] is False and body["text"]["format"]["type"] == "json_object"
+    assert body["input"] == [{"role": "user", "content": [{"type": "input_text", "text": '{"question":"test"}'}]}]
     assert "tools" not in body and headers["Authorization"] == "Bearer unit-test-openai-secret"
     assert json.loads(agent.store.db.execute("SELECT usage FROM calls").fetchone()[0])["input_tokens"] == 12
 
@@ -200,6 +201,23 @@ def test_openai_json_mode_rejection_retries_once_without_format(agent, monkeypat
         return {"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": '{"answer":"ok"}'}]}]}
     assert OpenAI(cfg, agent.store, transport).call("chat", {}) == {"answer": "ok"}
     assert len(requests) == 2 and "text" in requests[0] and "text" not in requests[1]
+
+
+def test_openai_gui_diagnostic_redacts_key_and_runtime_does_not_expose_message(agent, monkeypatch):
+    monkeypatch.setenv("FAKE_OPENAI_KEY", "private-key")
+    cfg = {"kind": "openai", "enabled": True, "model": "gpt-5.4", "api_key_env": "FAKE_OPENAI_KEY",
+           "timeout_seconds": 10, "max_calls_per_day": 10, "min_interval_seconds": 0, "max_output_tokens": 1000}
+    def fail(*_):
+        detail = {"error": {"param": "input", "code": None,
+                            "message": "Input was rejected: private-key"}}
+        raise urllib.error.HTTPError("https://example.test", 400, "bad", {}, io.BytesIO(json.dumps(detail).encode()))
+    with pytest.raises(ValueError) as gui_error:
+        OpenAI(cfg, agent.store, fail, diagnostic=True).call("chat", {})
+    assert "測試原因：Input was rejected: [API key]" in str(gui_error.value)
+    assert "private-key" not in str(gui_error.value)
+    with pytest.raises(ValueError) as runtime_error:
+        OpenAI(cfg, agent.store, fail).call("chat", {})
+    assert "Input was rejected" not in str(runtime_error.value)
 
 
 @pytest.mark.parametrize("sender,chat,chat_type,age,accepted", [(7,7,"private",0,True), (8,7,"private",0,False), (7,8,"private",0,False), (7,7,"group",0,False), (7,7,"private",500,False)])
