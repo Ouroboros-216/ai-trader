@@ -39,7 +39,7 @@ python -m pytest -q
 .\scripts\package.ps1
 ```
 
-交付包在 `dist/AITrader-v0.8.12.zip`，附 SHA-256。設定視窗儲存時會在 MT5 Common Files 的專用目錄產生帳號綁定；新版 EA 可自動讀取，不必為帳號與伺服器載入 `.set`。初始化參數錯誤時 EA 會彈出具體原因並記錄在 Experts。MT5 面板可送出中文文字並查看回覆；飛機狀態以中文敘述。包內不含設定金鑰、私人 local.json、資料庫或執行紀錄。
+交付包在 `dist/AITrader-v0.8.13.zip`，附 SHA-256。設定視窗儲存時會在 MT5 Common Files 的專用目錄產生帳號綁定；新版 EA 可自動讀取，不必為帳號與伺服器載入 `.set`。初始化參數錯誤時 EA 會彈出具體原因並記錄在 Experts。MT5 面板可送出中文文字並查看回覆；飛機狀態以中文敘述。包內不含設定金鑰、私人 local.json、資料庫或執行紀錄。
 
 設定視窗的「檢查更新」從公開 GitHub Release 取得新版 ZIP 與 SHA-256，校驗後更新程式及這台電腦已安裝的 `MQL5/Experts/AITrader/AITrader.ex5`；帳號、金鑰、交易資料及 Python 環境留在原處。若服務原本在運行，更新程序會停機後重啟。更新日誌在 `runtime/update.log`。更新後須在每個 MT5 終端機重新掛載 EA；舊版 EA 仍在記憶體中運行時，服務會停止新單。
 

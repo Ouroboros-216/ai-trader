@@ -2,7 +2,7 @@
 
 ## 最快設定方式：直接用視窗
 
-解壓縮新版 `AITrader-v0.8.12.zip`，進入其中的 `ai-trader` 資料夾，**雙擊 `開啟設定.cmd`**。第一次會自動安裝本專案的獨立 Python 環境（不下載套件）；設定視窗開啟後 CMD 會關閉。在視窗填帳號、完整伺服器名稱，選「模擬／實盤」，再選 Gemini 或 OpenAI（GPT），填該供應商的模型 ID／API key、飛機 bot token。按「測試 Gemini」或「測試 OpenAI（GPT）」，向自己的 bot 傳 `/start` 後按「讀取飛機 ID」，從清單選自己的 ID，再按「儲存設定」。通過測試的連線會自動設為 enabled，不需手改 `true`。
+解壓縮新版 `AITrader-v0.8.13.zip`，進入其中的 `ai-trader` 資料夾，**雙擊 `開啟設定.cmd`**。第一次會自動安裝本專案的獨立 Python 環境（不下載套件）；設定視窗開啟後 CMD 會關閉。在視窗填帳號、完整伺服器名稱，選「模擬／實盤」，再選 Gemini 或 OpenAI（GPT），填該供應商的模型 ID／API key、飛機 bot token。按「測試 Gemini」或「測試 OpenAI（GPT）」，向自己的 bot 傳 `/start` 後按「讀取飛機 ID」，從清單選自己的 ID，再按「儲存設定」。通過測試的連線會自動設為 enabled，不需手改 `true`。
 
 金鑰不寫進 `local.json`；視窗會用 Windows 目前使用者的 DPAPI 加密存入 `config/secrets.bin`。這個檔案不在 ZIP 裡，也無法在另一個 Windows 使用者帳戶直接解密。若原本已填好 `local.json`，新版壓縮包不會覆蓋它。
 
@@ -79,6 +79,8 @@ v0.8.10 把 OpenAI `input` 從單一 JSON 字串改成官方 Responses API 的�
 OpenAI v0.8.11 修正 JSON 模式的請求：`input` 訊息明確包含 `JSON` 字樣，符合 API 的格式驗證。
 
 OpenAI v0.8.12 讓「自動模式」策略草案最多等待 120 秒（`strategy_timeout_seconds`，可設 30–300 秒）；測試連線與持倉決策仍使用原本的 `timeout_seconds`。逾時不套用結果，也不自動重送；系統會暫停相同模型的新呼叫約 2 分鐘。請注意：請求可能已到達 API 並消耗 token，即使本機沒有取得可用回覆。用量以 OpenAI 平台顯示為準。
+
+v0.8.13 起，飛機上的策略草案以中文段落顯示商品、方向、進場、失效、管理、術語及風險，不再直接印出原始 JSON。收到草案後可以直接回覆問題，AI 會收到這份尚未套用的草案作為討論背景；例如傳「這張草案的 BOS 是什麼？」。要改條件則傳「修改 只做空」（也可用「調整」或「改成」），系統會產生新的待確認草案，舊提案失效。聊天本身不會確認或套用策略，也會使用一次 AI API 呼叫；確認策略後仍須另行確認「啟動」。
 
 ## 3. 建立 Telegram bot
 

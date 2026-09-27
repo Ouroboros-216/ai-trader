@@ -84,7 +84,7 @@ timeframes(M5/M15/H1/H4),entry,invalidation,management,definitions,
 risk_pct,total_risk_pct,daily_loss_pct,drawdown_pct。
 SMC 要明確描述 swing、BOS、掃流動性、FVG、order block 的採用定義與確認方式，避免未收棒與未確認 pivot 的前視。
 不保證任何策略獲利。單筆風險<=0.5%，總風險<=1.5%，日損<=2%，回撤<=5%。
-除使用者明確要求修改外保留 current_policy 欄位；初次採上述風險上限預設。
+若有 pending_policy，修改時以它為底稿，保留未要求更動的條件；否則保留 current_policy 欄位。初次採上述風險上限預設。
 只做空=>SELL，只做多=>BUY。只能從 available_symbols 選取券商實際商品名稱，勿自行猜測後綴；
 若同類商品有多個後綴且使用者未指定，提出問題。沒有新聞資料，不以新聞作必要進場條件。
 auto_mode=true 時，參考 market_context 中的已完成 K 棒，從 available_symbols 挑選商品與一至數種明確方法；
@@ -125,7 +125,7 @@ class Gemini:
         now = time.time()
         call_id = self.quota_store.reserve_call(kind, cfg, now)
         prompts = {"strategy": STRATEGY, "decisions": DECISIONS,
-                   "chat": '只讀查詢。根據提供的實際狀態回答，不提出操作。回覆 {"answer":"..."}。'}
+                   "chat": '只讀查詢。若有 pending_policy，使用者可能在討論這張尚未套用的草案；應根據草案回答，清楚區分已確認 policy，不得聲稱草案已套用。不能透過聊天修改或確認策略；要修改時提示使用者傳「修改 你的要求」。回覆 {"answer":"..."}。'}
         try:
             generation = {"responseMimeType": "application/json", "maxOutputTokens": cfg["max_output_tokens"]}
             if not cfg["model"].startswith("gemini-3"):
@@ -222,7 +222,7 @@ class OpenAI:
         now = time.time()
         call_id = self.quota_store.reserve_call(kind, cfg, now)
         prompts = {"strategy": STRATEGY, "decisions": DECISIONS,
-                   "chat": '只讀查詢。根據提供的實際狀態回答，不提出操作。回覆 {"answer":"..."}。'}
+                   "chat": '只讀查詢。若有 pending_policy，使用者可能在討論這張尚未套用的草案；應根據草案回答，清楚區分已確認 policy，不得聲稱草案已套用。不能透過聊天修改或確認策略；要修改時提示使用者傳「修改 你的要求」。回覆 {"answer":"..."}。'}
         http_fields = ("", "", "")
         try:
             body = {"model": cfg["model"], "instructions": SYSTEM + "\n" + prompts[kind],

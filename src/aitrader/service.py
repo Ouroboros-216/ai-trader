@@ -117,6 +117,49 @@ class Agent:
         self.publish()
         return identifier
 
+    def pending_policy(self):
+        identifier = self.store.get("pending", "")
+        row = self.store.db.execute(
+            "SELECT data FROM proposals WHERE id=? AND kind='policy' AND status='pending' AND expires>?",
+            (identifier, time.time())).fetchone()
+        return (identifier, json.loads(row["data"])) if row else ("", None)
+
+    @staticmethod
+    def policy_preview(policy, before, identifier):
+        labels = {"title": "名稱", "instructions": "適用範圍", "direction": "交易方向",
+                  "symbols": "商品", "timeframes": "週期", "entry": "進場條件",
+                  "invalidation": "失效條件", "management": "持倉管理", "definitions": "術語定義",
+                  "risk_pct": "單筆風險", "total_risk_pct": "總持倉風險",
+                  "daily_loss_pct": "每日損失上限", "drawdown_pct": "總回撤上限"}
+        changed = [labels[k] for k, v in policy.to_dict().items() if k != "version" and before.get(k) != v]
+        direction = {"BUY": "只做多", "SELL": "只做空", "BOTH": "多空皆可"}[policy.direction]
+        def paragraph(value):
+            return re.sub(r"。(?=\S)", "。\n", value.strip())
+        lines = ["策略草案｜" + policy.title, "版本 " + str(policy.version) + "；尚未套用，也不會直接交易。",
+                 "商品：" + "、".join(policy.symbols), "方向：" + direction,
+                 "分析週期：" + "、".join(policy.timeframes),
+                 "風險：單筆 " + str(policy.risk_pct) + "%／總持倉 " + str(policy.total_risk_pct) +
+                 "%／每日損失 " + str(policy.daily_loss_pct) + "%／總回撤 " + str(policy.drawdown_pct) + "%"]
+        for label, value in (("適用範圍", policy.instructions), ("進場條件", policy.entry),
+                             ("何時失效", policy.invalidation), ("進場後如何管理", policy.management),
+                             ("術語如何定義", policy.definitions)):
+            lines.extend(("", label + "：", paragraph(value)))
+        lines.extend(("", "本次變更：" + ("、".join(changed) if before else "首次建立"),
+                      "有疑問可直接回覆；要改內容，傳『修改 你的要求』，系統會產生新版草案。",
+                      "確認只保存策略，之後仍須另行確認『啟動』。草案 10 分鐘後過期。",
+                      "確認 " + identifier))
+        return "\n".join(lines)
+
+    def revise_draft(self, detail):
+        identifier, pending = self.pending_policy()
+        if not pending:
+            raise ValueError("目前沒有待確認的策略草案；請先傳『自動模式』或『策略 你的規則』")
+        if not detail.strip():
+            raise ValueError("請在『修改』後說明要改的策略條件")
+        return self.draft("以待確認草案為底稿，保留未要求更動的規則與商品（" +
+                          "、".join(pending["symbols"]) + "）；使用者修改要求：" + detail.strip(),
+                          pending_policy=pending)
+
     def auto_draft(self, detail=""):
         percentages = re.findall(r"(\d+(?:\.\d+)?)\s*%", detail)
         if len(percentages) > 1:
@@ -138,7 +181,7 @@ class Agent:
                        "不得自行新增方法、改變方向或風控。" + ("使用者補充：" + detail if detail else ""))
         return self.draft(instruction, auto=True, per_trade=per_trade, total=total)
 
-    def draft(self, instruction, auto=False, per_trade=None, total=None):
+    def draft(self, instruction, auto=False, per_trade=None, total=None, pending_policy=None):
         snapshot = self.snapshot()
         if snapshot.get("ea_version") != REQUIRED_EA_VERSION:
             raise ValueError("請先在 MT5 重新掛載 v1.010 EA，再建立策略")
@@ -162,6 +205,8 @@ class Agent:
             raise ValueError("MT5 市場報價沒有可分析的商品；請先手動顯示要交易的商品，等待 EA 更新行情")
         request = {"request": instruction, "current_policy": current.to_dict() if current else None,
                    "available_symbols": choices, "missing_symbols": snapshot.get("missing_symbols", [])}
+        if pending_policy:
+            request["pending_policy"] = pending_policy
         if auto:
             request["auto_mode"] = True
             request["bar_fields"] = ["time", "open", "high", "low", "close", "volume"]
@@ -198,10 +243,8 @@ class Agent:
         if any(x in instruction.lower() for x in ("只做多", "only buy", "long only")) and policy.direction != "BUY":
             raise ValueError("AI 未遵守只做多要求，草案被拒絕")
         identifier = self.propose("policy", policy.to_dict())
-        before = current.to_dict() if current else {}
-        changes = {k: {"原": before.get(k), "新": v} for k, v in policy.to_dict().items() if before.get(k) != v}
-        # Full new card plus concise change names avoids truncating old/new long text.
-        return "策略草案（確認只保存，啟動需另行確認）：\n" + dumps(policy.to_dict()) + "\n變更欄位：" + ", ".join(changes) + "\n確認 " + identifier
+        before = pending_policy or (current.to_dict() if current else {})
+        return self.policy_preview(policy, before, identifier)
 
     def confirm(self, identifier):
         row = self.store.db.execute("SELECT * FROM proposals WHERE id=?", (identifier,)).fetchone()
@@ -251,7 +294,7 @@ class Agent:
     def handle(self, message):
         message = message.strip()
         if message in {"/start", "/help", "說明"}:
-            return "自動模式：AI 依目前商品行情提出交易方法。\n策略 用SMC只做空…\n狀態｜持倉｜原因｜暫停｜啟動｜平倉｜重設回撤\n確認 <提案ID>\n其他問題為只讀 AI 查詢。策略保存後需確認啟動。"
+            return "自動模式：AI 依目前商品行情提出交易方法。\n策略 用SMC只做空…\n草案後可直接提問；傳『修改 你的要求』會產生新版草案。\n狀態｜持倉｜原因｜暫停｜啟動｜平倉｜重設回撤\n確認 <提案ID>\n其他問題為只讀 AI 查詢。策略保存後需確認啟動。"
         if message in {"自動模式", "/auto"} or message.startswith(("自動模式 ", "/auto ")):
             detail = message.split(" ", 1)[1].strip() if " " in message else ""
             return self.auto_draft(detail)
@@ -259,6 +302,8 @@ class Agent:
             return self.auto_draft(message)
         if message.startswith(("策略 ", "/strategy ")):
             return self.draft(message.split(" ", 1)[1])
+        if message.startswith(("修改 ", "調整 ", "改成 ")):
+            return self.revise_draft(message.split(" ", 1)[1])
         if message.startswith(("確認 ", "/confirm ")):
             return self.confirm(message.split(" ", 1)[1].strip())
         if message in {"暫停", "/pause"}:
@@ -296,8 +341,13 @@ class Agent:
             return "\n".join(parts)
         if message in {"原因", "/why"}:
             return dumps(self.store.memory(8))
-        answer = self.provider.call("chat", {"question": message, "snapshot": self.snapshot(), "policy": self.store.get("policy"), "memory": self.store.memory()})
+        pending_id, pending_policy = self.pending_policy()
+        answer = self.provider.call("chat", {"question": message, "snapshot": self.snapshot(),
+                                             "policy": self.store.get("policy"), "pending_policy": pending_policy,
+                                             "memory": self.store.memory()})
         reply = str(answer.get("answer", "沒有可用回答"))[:10000]
+        if pending_id and self.pending_policy()[0] == pending_id:
+            reply += "\n\n這張草案尚未套用。要改內容可傳『修改 你的要求』；若決定保存，傳『確認 " + pending_id + "』。"
         self.store.event("conversation", {"question": message, "answer": reply})
         return reply
 
