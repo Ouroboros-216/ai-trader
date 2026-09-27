@@ -140,7 +140,9 @@ def test_openai_responses_adapter_is_stateless_and_records_usage(agent, monkeypa
     url, body, headers, timeout = requests[0]
     assert url == "https://api.openai.com/v1/responses"
     assert body["store"] is False and body["text"]["format"]["type"] == "json_object"
-    assert body["input"] == [{"role": "user", "content": [{"type": "input_text", "text": '{"question":"test"}'}]}]
+    assert body["input"][0]["role"] == "user"
+    input_text = body["input"][0]["content"][0]["text"]
+    assert "JSON" in input_text and '{"question":"test"}' in input_text
     assert "tools" not in body and headers["Authorization"] == "Bearer unit-test-openai-secret"
     assert json.loads(agent.store.db.execute("SELECT usage FROM calls").fetchone()[0])["input_tokens"] == 12
 

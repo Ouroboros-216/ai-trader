@@ -226,7 +226,8 @@ class OpenAI:
         http_fields = ("", "", "")
         try:
             body = {"model": cfg["model"], "instructions": SYSTEM + "\n" + prompts[kind],
-                    "input": [{"role": "user", "content": [{"type": "input_text", "text": dumps(payload)}]}],
+                    "input": [{"role": "user", "content": [{"type": "input_text",
+                               "text": "Return only a valid JSON object for the following data:\n" + dumps(payload)}]}],
                     "text": {"format": {"type": "json_object"}},
                     "max_output_tokens": cfg["max_output_tokens"], "store": False}
             endpoint = "https://api.openai.com/v1/responses"
