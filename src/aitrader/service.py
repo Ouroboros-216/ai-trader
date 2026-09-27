@@ -43,6 +43,8 @@ def load_config(path):
     p = cfg["provider"]
     if p["kind"] not in ADAPTERS:
         raise ValueError("AI provider adapter not installed")
+    if p.get("api_key_env") != {"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY"}[p["kind"]]:
+        raise ValueError("AI API 金鑰來源與所選供應商不一致")
     number(p["max_calls_per_day"], 1, 10000)
     number(p["min_interval_seconds"], 1, 3600)
     number(p["timeout_seconds"], 1, 60)

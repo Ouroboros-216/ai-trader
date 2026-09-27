@@ -59,7 +59,7 @@ class Store:
             backoff = max(self.get("provider_backoff_until", 0),
                           self.get("provider_transient_backoff_until:" + cfg["model"], 0))
             if now < backoff:
-                raise ValueError("Gemini 暫時等待約 " + str(int(backoff-now)+1) + " 秒後再試")
+                raise ValueError("AI API 暫時等待約 " + str(int(backoff-now)+1) + " 秒後再試")
             last = self.db.execute("SELECT MAX(time) FROM calls").fetchone()[0]
             count = self.db.execute("SELECT COUNT(*) FROM calls WHERE time>=?", (int(now // 86400) * 86400,)).fetchone()[0]
             if count >= cfg["max_calls_per_day"]:

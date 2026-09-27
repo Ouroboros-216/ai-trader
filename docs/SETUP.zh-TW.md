@@ -1,26 +1,26 @@
-# Telegram、Gemini API、MT5 接線流程
+# 飛機、AI API、MT5 接線流程
 
 ## 最快設定方式：直接用視窗
 
-解壓縮新版 `AITrader-v0.8.7.zip`，進入其中的 `ai-trader` 資料夾，**雙擊 `開啟設定.cmd`**。第一次會自動安裝本專案的獨立 Python 環境（不下載套件）；設定視窗開啟後 CMD 會關閉。在視窗填帳號、完整伺服器名稱，選「模擬／實盤」，再填 Gemini 模型 ID／API key、飛機 bot token。按「測試 Gemini」，向自己的 bot 傳 `/start` 後按「讀取飛機 ID」，從清單選自己的 ID，再按「儲存設定」。通過測試的連線會自動設為 enabled，不需手改 `true`。
+解壓縮新版 `AITrader-v0.8.8.zip`，進入其中的 `ai-trader` 資料夾，**雙擊 `開啟設定.cmd`**。第一次會自動安裝本專案的獨立 Python 環境（不下載套件）；設定視窗開啟後 CMD 會關閉。在視窗填帳號、完整伺服器名稱，選「模擬／實盤」，再選 Gemini 或 OpenAI（GPT），填該供應商的模型 ID／API key、飛機 bot token。按「測試 Gemini」或「測試 OpenAI（GPT）」，向自己的 bot 傳 `/start` 後按「讀取飛機 ID」，從清單選自己的 ID，再按「儲存設定」。通過測試的連線會自動設為 enabled，不需手改 `true`。
 
 金鑰不寫進 `local.json`；視窗會用 Windows 目前使用者的 DPAPI 加密存入 `config/secrets.bin`。這個檔案不在 ZIP 裡，也無法在另一個 Windows 使用者帳戶直接解密。若原本已填好 `local.json`，新版壓縮包不會覆蓋它。
 
 接著依第 6 節把 EA 掛到相應 MT5。設定視窗按「儲存設定」會將帳號、伺服器與帳戶類型綁定資料寫入 MT5 Common Files；新版 EA 的帳號 `0`、伺服器空白代表自動讀取此綁定，並核對目前登入的 MT5 帳戶。若佣金或其他 EA 參數有自訂，仍在 EA「輸入」頁按「載入／Load」選擇 `config/AITrader.generated.set`。按一次「啟動服務」會載入所有已儲存的帳號，選中的帳號還沒掛 EA 也不會阻擋；該帳號會等待連線。之後可用「檢查 MT5」核對目前帳號。策略與自動交易仍要透過飛機／MT5 個別確認。以下手動步驟保留給需要用命令列的情況。
 
-「每手開平合計佣金」可以只填 **一個數值**，供該帳戶所有商品使用；若商品費率不同，可在 EA 進階參數依商品順序設定。單位是帳戶貨幣、每 1 手完整開平的總額。未知時填 `-1`。掛上 EA 後可按「讀取 MT5 佣金」：只有 MT5 券商資料提供可明確換算的簡單固定規則才會建議帶入，帶入後仍要儲存並重新掛 EA。無法換算就維持未知並阻擋新單；可看帳戶實際成交紀錄的佣金或向券商確認。這個版本的 Gemini API 沒有網路搜尋功能；公開資料也不能替代帳戶實際費率與貨幣核對。
+「每手開平合計佣金」可以只填 **一個數值**，供該帳戶所有商品使用；若商品費率不同，可在 EA 進階參數依商品順序設定。單位是帳戶貨幣、每 1 手完整開平的總額。未知時填 `-1`。掛上 EA 後可按「讀取 MT5 佣金」：只有 MT5 券商資料提供可明確換算的簡單固定規則才會建議帶入，帶入後仍要儲存並重新掛 EA。無法換算就維持未知並阻擋新單；可看帳戶實際成交紀錄的佣金或向券商確認。這個版本沒有啟用 AI 網路搜尋工具；公開資料也不能替代帳戶實際費率與貨幣核對。
 
 ## 0. 先知道三者怎麼連
 
 ```text
 你的 Telegram 私人聊天
           ⇅
-電腦上的 AI Trader Python 服務 ⇄ Gemini API
+電腦上的 AI Trader Python 服務 ⇄ 你選擇的 Gemini／OpenAI API
           ⇅ 本機 Common Files
       MT5 的 AITrader EA ⇄ 券商帳戶
 ```
 
-Telegram 不是券商登入介面；Gemini 不拿券商密碼。Python 讀寫本機訊息檔，由 EA 驗證並下單。電腦／VPS、MT5 和 Python 都需運行。此版本不用 DLL，也不用在 MT5 加入 API 的 WebRequest 網址。
+Telegram 不是券商登入介面；AI API 不拿券商密碼。Python 讀寫本機訊息檔，由 EA 驗證並下單。電腦／VPS、MT5 和 Python 都需運行。此版本不用 DLL，也不用在 MT5 加入 API 的 WebRequest 網址。
 
 建議先用**獨立 MT5 終端及專用 Demo 帳戶**。不要把這支 EA 放到原有黃金研究終端的圖表上，不要與原 EA 共用帳戶。沒有替你建立或變更任何帳戶。
 
@@ -50,7 +50,8 @@ Set-Location 'C:\Users\azsxd\Documents\ChatGPT\AI操盤\ai-trader'
 | `server` | MT5 顯示的完整伺服器名稱，大小寫一致 |
 | `magic` | 保持 `26092751`，須與 EA 一致 |
 | `bridge_dir` | 先保持預設 `%APPDATA%/MetaQuotes/Terminal/Common/Files/AITrader/demo-1` |
-| `provider.model` | 下一步從 AI Studio 選出的完整模型 ID |
+| `provider.kind` | `gemini` 或 `openai`；從視窗選擇更容易 |
+| `provider.model` | 所選供應商提供的完整 API 模型 ID |
 | `provider.enabled` | 初始保持 `false`，連線測試成功後改成 `true` |
 | `telegram.enabled` | 初始保持 `false`，配對完成後改成 `true` |
 
@@ -64,6 +65,12 @@ Set-Location 'C:\Users\azsxd\Documents\ChatGPT\AI操盤\ai-trader'
 4. 想先用免費層，需在 Google 帳戶／專案側確認計費狀態。程式不會開通付費，但無法替已綁定計費的 key 保證零費用。額度依專案／模型而異，不是固定每小時 24 次。[官方 rate limits](https://ai.google.dev/gemini-api/docs/rate-limits)
 
 先把 key 留在你本機的密碼管理工具，下一節一起輸入。不需要傳给 Codex 或 Telegram。
+
+### 改用 OpenAI（GPT）API
+
+在 [OpenAI API 平台](https://platform.openai.com/api-keys) 建立 API key，並確認所選模型可供你的 API 專案使用；**ChatGPT 訂閱與 API 用量分開**。在設定視窗「② AI API」選「OpenAI（GPT）」，填入平台提供的完整模型 ID 和 OpenAI API key，按「測試 OpenAI（GPT）」成功後按「儲存設定」，最後停止舊服務並重新啟動。所有帳號共用這項選擇；原 Gemini key 仍加密保存，切回 Gemini 時可沿用。測試與後續分析會產生 API 用量，程式不會在 Gemini 503 時自行切換至 OpenAI。
+
+這個接法使用 OpenAI [Responses API](https://developers.openai.com/api/docs/guides/text) 的 JSON 回覆模式，關閉伺服端回應儲存，不開啟網路搜尋或其他工具。模型仍只能提出策略與交易決策；EA 的帳號核對與風控不變。OpenAI 回應逾時、限流、JSON 無效或不完整時，本輪不產生新單。其他 AI 供應商尚未接入，需要新增對應 adapter；「可更換」不代表任意 API key 可以直接填進同一欄使用。
 
 ## 3. 建立 Telegram bot
 
@@ -82,7 +89,7 @@ Set-Location 'C:\Users\azsxd\Documents\ChatGPT\AI操盤\ai-trader'
 .\scripts\set-secrets.ps1
 ```
 
-會依序以隱藏輸入詢問 Gemini key、Telegram token。預設存入**目前 Windows 使用者環境變數**，也設在目前 PowerShell 程序；不寫入專案、Git 或日誌。
+會依序以隱藏輸入詢問 Gemini key、OpenAI key、Telegram token。預設存入**目前 Windows 使用者環境變數**，也設在目前 PowerShell 程序；不寫入專案、Git 或日誌。
 
 環境變數名稱：`GEMINI_API_KEY`、`AI_TRADER_TELEGRAM_TOKEN`。若只想本次 PowerShell 有效，加 `-SessionOnly`。已開啟的服務需重啟才能取得新憑證。
 
@@ -166,7 +173,7 @@ Set-Location 'C:\Users\azsxd\Documents\ChatGPT\AI操盤\ai-trader'
 
 先停止舊服務，再以 v0.8.4 ZIP 覆蓋程式檔；保留既有 `config/local.json`、`config/secrets.bin` 及 `runtime` 資料夾。首次在新版設定視窗按「儲存設定」，原帳號會成為第一個獨立帳號，其策略與資料庫維持原位，且仍是模擬模式。視窗下方按「新增帳號」，填第二個 MT5 登入、完整伺服器、帳戶類型與該帳號佣金，再按「儲存設定」。可重複加入更多帳號；既有帳號請用下拉清單切換，勿直接把舊帳號欄位改成新登入。
 
-每個帳號開一個 MT5 終端機／視窗，登入相應帳號，在各自圖表掛 **v1.010** EA。EA 的 `InpBridge=AITrader\demo-1`、`InpDemoLogin=0`、`InpDemoServer` 空白可保持預設；它從 Common Files 的 `AITrader/accounts.txt` 按當前登入帳號、伺服器與帳戶類型自動選通訊目錄和成本。若是從舊 `.set` 載入明確帳號／伺服器，請將這三欄恢復預設再重掛。每個帳號各有策略、暫停、持倉與風控鎖；服務只啟動一份，Gemini key、配額及飛機 bot 共用。
+每個帳號開一個 MT5 終端機／視窗，登入相應帳號，在各自圖表掛 **v1.010** EA。EA 的 `InpBridge=AITrader\demo-1`、`InpDemoLogin=0`、`InpDemoServer` 空白可保持預設；它從 Common Files 的 `AITrader/accounts.txt` 按當前登入帳號、伺服器與帳戶類型自動選通訊目錄和成本。若是從舊 `.set` 載入明確帳號／伺服器，請將這三欄恢復預設再重掛。每個帳號各有策略、暫停、持倉與風控鎖；服務只啟動一份，所選 AI API 與飛機 bot 共用。
 
 Telegram 傳 `帳號` 列出清單，直接傳帳號數字（例如 `53070196`）即可選定帳號；若不同伺服器恰有相同帳號數字，才須傳完整 `demo-...` 代碼。之後的 `狀態`、`策略`、`啟動`、`平倉` 只作用於該帳號。提案按鈕含帳號綁定，切換帳號後仍會確認原帳號的提案。新增帳號或變更共用 API 設定後，停止並重啟服務才會載入。風控上限按各帳戶個別計算，沒有跨帳戶合併保證金或風險預算。此版只支援同一台 Windows、同一使用者下的多個 MT5 終端機；跨電腦帳號需另行部署獨立服務。
 

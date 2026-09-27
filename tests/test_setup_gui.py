@@ -69,6 +69,27 @@ def test_provider_factory_rejects_uninstalled_provider():
         build_provider({"kind": "uninstalled"}, object())
 
 
+def test_openai_selection_keeps_gemini_key_separate(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    root = tmp_path / "config"
+    root.mkdir()
+    template = json.loads((setup_gui.ROOT / "config" / "example.json").read_text(encoding="utf-8"))
+    template["bridge_dir"] = str(tmp_path / "MetaQuotes" / "Terminal" / "Common" / "Files" / "AITrader" / "demo-1")
+    (root / "example.json").write_text(json.dumps(template), encoding="utf-8")
+    path = root / "local.json"
+    first = save_form(path, "12345", "TEST-Demo", "gemini-test", "", True, False,
+                      "gemini-secret", "", secrets_path=root / "secrets.bin")
+    second = save_form(path, "12345", "TEST-Demo", "gpt-test", "", True, False,
+                       "openai-secret", "", secrets_path=root / "secrets.bin", provider_kind="openai")
+    assert first["provider"]["kind"] == "gemini"
+    assert second["provider"]["kind"] == "openai"
+    assert second["provider"]["api_key_env"] == "OPENAI_API_KEY"
+    assert "openai-secret" not in path.read_text(encoding="utf-8")
+    secrets = read_secrets(root / "secrets.bin")
+    assert secrets["GEMINI_API_KEY"] == "gemini-secret"
+    assert secrets["OPENAI_API_KEY"] == "openai-secret"
+
+
 def test_start_service_loads_all_profiles_without_selected_ea(tmp_path, monkeypatch):
     bridge_a, bridge_b = tmp_path / "bridge-a", tmp_path / "bridge-b"
     profiles = {"a": {"provider": {"enabled": True}, "bridge_dir": str(bridge_a)},
@@ -107,8 +128,10 @@ def test_account_dropdown_shows_broker_and_selects_original_profile(tmp_path, mo
     window.account_choice = SimpleNamespace(get=lambda: labels[b])
     selected = {}
     window.vars = {name: SimpleNamespace(set=lambda value, key=name: selected.__setitem__(key, value))
-                   for name in ("account", "server", "symbols", "commissions", "model", "account_mode", "user_id")}
+                   for name in ("account", "server", "symbols", "commissions", "model", "provider", "account_mode", "user_id")}
     window.status = SimpleNamespace(set=lambda value: selected.__setitem__("status", value))
+    window.model_drafts = {}
+    window.provider_test_button = SimpleNamespace(configure=lambda **kwargs: None)
     window._choose_account()
     assert window.selected_id == b
     assert selected["account"] == "26091375" and selected["server"] == "VantageMarkets-Demo"

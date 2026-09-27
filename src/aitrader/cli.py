@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from .report import replay, report
-from .provider import Gemini
+from .provider import build_provider
 from .service import Agent, load_config
 from .storage import ProcessLock, dumps
 from .telegram import Telegram
@@ -20,7 +20,7 @@ def main():
     sub.add_parser("check")
     sub.add_parser("report")
     sub.add_parser("replay")
-    sub.add_parser("api-check", help="Make one billed/quota-counted Gemini connectivity request")
+    sub.add_parser("api-check", help="Make one billed/quota-counted AI provider connectivity request")
     sub.add_parser("telegram-info", help="Read bot name and recent private sender IDs; no pairing or messages sent")
     message = sub.add_parser("message")
     message.add_argument("text", help="Offline operator command; stop service first, or use Telegram while running")
@@ -34,7 +34,7 @@ def main():
                 snapshot = agent.snapshot()
                 print(dumps({"bridge": "ok", "account": snapshot["account"], "demo": snapshot["demo"], "symbols": list(snapshot["symbols"]), "missing_symbols": snapshot.get("missing_symbols"), "provider_enabled": cfg["provider"]["enabled"]}))
             elif args.command == "api-check":
-                client = Gemini(cfg["provider"] | {"enabled": True}, agent.store)
+                client = build_provider(cfg["provider"] | {"enabled": True}, agent.store)
                 print(dumps(client.call("chat", {"question": "請只回答連線成功，沒有行情資料，不作交易判斷。"})))
             elif args.command == "telegram-info":
                 tg = Telegram(cfg["telegram"], agent)

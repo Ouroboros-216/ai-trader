@@ -14,6 +14,9 @@ from ctypes import wintypes
 from pathlib import Path
 
 
+ALLOWED_KEYS = {"GEMINI_API_KEY", "OPENAI_API_KEY", "AI_TRADER_TELEGRAM_TOKEN"}
+
+
 class _Blob(ctypes.Structure):
     _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
 
@@ -70,7 +73,7 @@ def read_secrets(path: str | Path) -> dict[str, str]:
     if not path.exists():
         return {}
     data = json.loads(_unprotect(path.read_bytes()).decode("utf-8"))
-    if not isinstance(data, dict) or any(k not in {"GEMINI_API_KEY", "AI_TRADER_TELEGRAM_TOKEN"} or not isinstance(v, str) for k, v in data.items()):
+    if not isinstance(data, dict) or any(k not in ALLOWED_KEYS or not isinstance(v, str) for k, v in data.items()):
         raise ValueError("invalid encrypted secret store")
     return data
 
@@ -79,7 +82,7 @@ def save_secrets(path: str | Path, updated: dict[str, str]) -> None:
     path = Path(path)
     existing = read_secrets(path)
     for key, value in updated.items():
-        if key not in {"GEMINI_API_KEY", "AI_TRADER_TELEGRAM_TOKEN"} or not isinstance(value, str):
+        if key not in ALLOWED_KEYS or not isinstance(value, str):
             raise ValueError("unsupported secret")
         if value:
             existing[key] = value

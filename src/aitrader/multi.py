@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .accounts import load_profiles
 from .contracts import StrategyPolicy
-from .provider import Gemini
+from .provider import ADAPTERS
 from .secrets import load_into_environment
 from .service import Agent
 from .storage import ProcessLock, Store, dumps
@@ -359,7 +359,7 @@ def run(root: Path):
         stack.enter_context(ProcessLock(runtime / "multi.lock"))
         for cfg in profiles.values():
             stack.enter_context(ProcessLock(Path(cfg["bridge_dir"]) / "service.lock"))
-        quota = Store(runtime / "shared-api.sqlite")
+        quota = Store(runtime / ("shared-openai-api.sqlite" if next(iter(profiles.values()))["provider"]["kind"] == "openai" else "shared-api.sqlite"))
         router_store = Store(runtime / "telegram-router.sqlite")
         stack.callback(quota.db.close)
         stack.callback(router_store.db.close)
@@ -367,7 +367,7 @@ def run(root: Path):
         for identifier, cfg in profiles.items():
             agent = Agent(cfg)
             # One API key means one global quota/backoff across all accounts.
-            agent.provider = Gemini(cfg["provider"], agent.store, quota_store=quota)
+            agent.provider = ADAPTERS[cfg["provider"]["kind"]](cfg["provider"], agent.store, quota_store=quota)
             agents[identifier] = agent
             stack.callback(agent.close)
         recover_incomplete_batches(agents, router_store)

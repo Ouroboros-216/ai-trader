@@ -16,7 +16,7 @@ from tkinter import messagebox, ttk
 
 from .bridge import Bridge, atomic_write
 from .contracts import MarketSnapshot
-from .provider import Gemini
+from .provider import ADAPTERS, build_provider
 from .secrets import load_into_environment, read_secrets, save_secrets
 from .storage import ProcessLock, Store
 from .telegram import Telegram
@@ -28,6 +28,8 @@ from .accounts import (load_profiles, new_profile_config, profile_id, profile_pa
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "config" / "local.json"
 SECRETS = ROOT / "config" / "secrets.bin"
+PROVIDER_LABELS = {"Gemini": "gemini", "OpenAI（GPT）": "openai"}
+PROVIDER_KEYS = {"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY"}
 
 
 def initial_config(path=CONFIG):
@@ -50,7 +52,7 @@ def valid_form(account: str, server: str, model: str, user_id: str):
     if not server.strip() or any(c in server for c in ',|\r\n"'):
         raise ValueError("請輸入完整 MT5 伺服器名稱")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", model):
-        raise ValueError("請填入 AI Studio 顯示的模型 ID")
+        raise ValueError("請填入所選 AI API 的完整模型 ID")
     if user_id and (not user_id.isdecimal() or int(user_id) <= 0):
         raise ValueError("Telegram ID 必須是正整數")
 
@@ -88,8 +90,11 @@ def bridge_relative(value: str) -> str:
 def save_form(config_path: Path, account: str, server: str, model: str, user_id: str,
               gemini_ok: bool, telegram_ok: bool, new_key: str, new_token: str,
               symbols: str = "AUTO", commissions: str = "-1",
-              secrets_path: Path | None = None, account_mode: str = "demo", live_enabled: bool = False) -> dict:
+              secrets_path: Path | None = None, account_mode: str = "demo", live_enabled: bool = False,
+              provider_kind: str = "gemini") -> dict:
     valid_form(account, server, model, user_id)
+    if provider_kind not in ADAPTERS:
+        raise ValueError("不支援此 AI API")
     if account_mode not in {"demo", "real"} or type(live_enabled) is not bool or (account_mode == "demo" and live_enabled):
         raise ValueError("帳戶模式或實盤授權設定無效")
     symbols, commissions = valid_ea(symbols, commissions)
@@ -100,8 +105,9 @@ def save_form(config_path: Path, account: str, server: str, model: str, user_id:
         raise ValueError("MT5 共用資料夾路徑無法解析")
     secrets_file = secrets_path or config_path.with_name("secrets.bin")
     saved = read_secrets(secrets_file)
-    if gemini_ok and not (new_key or saved.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")):
-        raise ValueError("Gemini 已勾選連線成功，但找不到 API key")
+    key_env = PROVIDER_KEYS[provider_kind]
+    if gemini_ok and not (new_key or saved.get(key_env) or os.environ.get(key_env)):
+        raise ValueError("已測試 AI API，但找不到所選供應商的 API key")
     if telegram_ok and not (new_token or saved.get("AI_TRADER_TELEGRAM_TOKEN") or os.environ.get("AI_TRADER_TELEGRAM_TOKEN")):
         raise ValueError("Telegram 已勾選連線成功，但找不到 bot token")
     config["account"] = account
@@ -116,13 +122,15 @@ def save_form(config_path: Path, account: str, server: str, model: str, user_id:
         config["ea"]["max_spread_points"] = ",".join("25" for _ in symbols.split(","))
     if len(symbols.split(",")) != len(config["ea"]["slippage_points"].split(",")):
         config["ea"]["slippage_points"] = ",".join("3" for _ in symbols.split(","))
+    config["provider"]["kind"] = provider_kind
+    config["provider"]["api_key_env"] = key_env
     config["provider"]["model"] = model.strip()
     config["provider"]["enabled"] = bool(gemini_ok)
     config["telegram"]["user_id"] = int(user_id) if user_id else 0
     config["telegram"]["chat_id"] = int(user_id) if user_id else 0
     config["telegram"]["enabled"] = bool(telegram_ok and user_id)
     # Protect secrets before writing a config that enables their use.
-    save_secrets(secrets_file, {"GEMINI_API_KEY": new_key.strip() or (os.environ.get("GEMINI_API_KEY", "") if not saved.get("GEMINI_API_KEY") else ""),
+    save_secrets(secrets_file, {key_env: new_key.strip() or (os.environ.get(key_env, "") if not saved.get(key_env) else ""),
                                 "AI_TRADER_TELEGRAM_TOKEN": new_token.strip() or (os.environ.get("AI_TRADER_TELEGRAM_TOKEN", "") if not saved.get("AI_TRADER_TELEGRAM_TOKEN") else "")})
     atomic_write(config_path, json.dumps(config, ensure_ascii=False, indent=2))
     preset = ["InpBridge=" + bridge_input, "InpDemoLogin=" + account, "InpDemoServer=" + server.strip(),
@@ -150,23 +158,25 @@ class SetupWindow:
         config = initial_config(self.profile_config)
         shared_config = initial_config(profile_path(ROOT, self.registry, self.registry["shared_profile"])) if self.registry.get("shared_profile") in self.registry["profiles"] else config
         load_into_environment(CONFIG)
-        saved = read_secrets(SECRETS)
+        current_kind = shared_config["provider"].get("kind", "gemini")
+        current_label = next((label for label, kind in PROVIDER_LABELS.items() if kind == current_kind), "Gemini")
+        self.current_provider_label = current_label
+        self.model_drafts = {current_label: shared_config["provider"].get("model", "")}
         self.vars = {
             "account": tk.StringVar(value=config.get("account", "")),
             "server": tk.StringVar(value=config.get("server", "")),
             "symbols": tk.StringVar(value=config.get("ea", {}).get("symbols", "AUTO")),
             "commissions": tk.StringVar(value=config.get("ea", {}).get("commission_round_turn", "-1")),
             "account_mode": tk.StringVar(value="實盤" if config.get("account_mode", "demo") == "real" else "模擬"),
+            "provider": tk.StringVar(value=current_label),
             "model": tk.StringVar(value=shared_config["provider"].get("model", "")),
-            "gemini_key": tk.StringVar(),
+            "api_key": tk.StringVar(),
             "telegram_token": tk.StringVar(),
             "user_id": tk.StringVar(value=str(shared_config["telegram"].get("user_id") or "")),
         }
-        self.gemini_ok = bool(shared_config["provider"].get("enabled"))
+        self.provider_ok = bool(shared_config["provider"].get("enabled"))
         self.telegram_ok = bool(shared_config["telegram"].get("enabled"))
         self.verified_ids = [str(shared_config["telegram"].get("user_id"))] if self.telegram_ok else []
-        self.saved_hint = {"gemini": bool(saved.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")),
-                           "telegram": bool(saved.get("AI_TRADER_TELEGRAM_TOKEN") or os.environ.get("AI_TRADER_TELEGRAM_TOKEN"))}
         update_log = ROOT / "runtime" / "update.log"
         startup_hint = update_log.read_text(encoding="utf-8").strip() if update_log.is_file() else ""
         try:
@@ -178,20 +188,32 @@ class SetupWindow:
         self.status = tk.StringVar(value=startup_hint or "先填資料，測試連線，最後按「儲存設定」。")
         self.account_choice = tk.StringVar(value=self.account_labels.get(self.selected_id, ""))
         self._build()
-        for name in ("model", "gemini_key"):
-            self.vars[name].trace_add("write", lambda *_: self._invalidate("gemini"))
+        for name in ("model", "api_key"):
+            self.vars[name].trace_add("write", lambda *_: self._invalidate("provider"))
         self.vars["telegram_token"].trace_add("write", lambda *_: self._invalidate("telegram"))
         self.vars["user_id"].trace_add("write", lambda *_: self._select_user())
 
     def _invalidate(self, which):
-        if which == "gemini":
-            self.gemini_ok = False
+        if which == "provider":
+            self.provider_ok = False
         else:
             self.telegram_ok = False
             self.verified_ids = []
 
     def _select_user(self):
         self.telegram_ok = self.vars["user_id"].get().strip() in self.verified_ids
+
+    def _provider_selected(self, *_):
+        selected = self.vars["provider"].get()
+        if selected not in PROVIDER_LABELS:
+            return
+        self.model_drafts[self.current_provider_label] = self.vars["model"].get().strip()
+        self.current_provider_label = selected
+        self.vars["model"].set(self.model_drafts.get(selected, ""))
+        self.vars["api_key"].set("")
+        self.provider_ok = False
+        self.provider_test_button.configure(text="測試 " + selected)
+        self.status.set("已選擇 " + selected + "；填模型 ID 和 API key，測試成功後儲存，並重啟服務。")
 
     def _build(self):
         frame = ttk.Frame(self.root, padding=16)
@@ -208,11 +230,15 @@ class SetupWindow:
         self._field(frame, 7, "每手開平合計佣金", "commissions")
         ttk.Label(frame, text="佣金填一個數值套用此帳戶全部商品；未知填 -1。可先接 MT5 再讀取券商規則。", wraplength=730).grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
-        ttk.Label(frame, text="② AI API", font=("Microsoft JhengHei", 11, "bold")).grid(row=9, column=0, columnspan=3, sticky="w", pady=(0, 5))
+        ttk.Label(frame, text="② AI API", font=("Microsoft JhengHei", 11, "bold")).grid(row=9, column=0, sticky="w", pady=(0, 5))
+        self.provider_box = ttk.Combobox(frame, textvariable=self.vars["provider"], values=list(PROVIDER_LABELS), state="readonly", width=18)
+        self.provider_box.grid(row=9, column=1, sticky="w", pady=(0, 5))
+        self.provider_box.bind("<<ComboboxSelected>>", self._provider_selected)
         self._field(frame, 10, "模型 ID", "model")
-        self._field(frame, 11, "API key", "gemini_key", secret=True)
-        ttk.Label(frame, text="目前支援 Gemini；金鑰留白沿用已儲存金鑰，測試會使用一次 API 配額。", wraplength=730).grid(row=12, column=0, columnspan=2, sticky="w")
-        ttk.Button(frame, text="測試 Gemini", command=self.test_gemini).grid(row=12, column=2, sticky="e", pady=6)
+        self._field(frame, 11, "API key", "api_key", secret=True)
+        ttk.Label(frame, text="選 Gemini 或 OpenAI（GPT）；金鑰留白沿用該供應商已儲存金鑰。測試會使用一次 API 配額；切換不會自動改用付費 API。", wraplength=730).grid(row=12, column=0, columnspan=2, sticky="w")
+        self.provider_test_button = ttk.Button(frame, text="測試 " + self.vars["provider"].get(), command=self.test_provider)
+        self.provider_test_button.grid(row=12, column=2, sticky="e", pady=6)
 
         ttk.Label(frame, text="③ 第三方軟體", font=("Microsoft JhengHei", 11, "bold")).grid(row=13, column=0, columnspan=3, sticky="w", pady=(8, 5))
         self._field(frame, 14, "飛機 Bot token", "telegram_token", secret=True)
@@ -265,11 +291,15 @@ class SetupWindow:
         values = {"account": config["account"], "server": config["server"],
                   "symbols": config["ea"]["symbols"], "commissions": config["ea"]["commission_round_turn"],
                   "model": shared["provider"]["model"],
+                  "provider": next((label for label, kind in PROVIDER_LABELS.items() if kind == shared["provider"].get("kind", "gemini")), "Gemini"),
                   "account_mode": "實盤" if config.get("account_mode", "demo") == "real" else "模擬",
                   "user_id": str(shared["telegram"].get("user_id") or "")}
         for name, value in values.items():
             self.vars[name].set(value)
-        self.gemini_ok = shared["provider"]["enabled"]
+        self.current_provider_label = values["provider"]
+        self.model_drafts[self.current_provider_label] = values["model"]
+        self.provider_test_button.configure(text="測試 " + values["provider"])
+        self.provider_ok = shared["provider"]["enabled"]
         self.telegram_ok = shared["telegram"]["enabled"]
         self.status.set("已選擇 " + self.account_labels[identifier] + "；修改佣金後按『儲存設定』。更換登入帳號請按『新增帳號』。")
 
@@ -304,7 +334,7 @@ class SetupWindow:
                 result = function()
             except Exception as exc:
                 if self.root.winfo_exists():
-                    error = str(exc) if isinstance(exc, ValueError) and str(exc).startswith("Gemini HTTP ") else (
+                    error = str(exc) if isinstance(exc, ValueError) and str(exc).startswith(("Gemini HTTP ", "OpenAI HTTP ")) else (
                         "HTTP " + str(exc.code) if hasattr(exc, "code") else type(exc).__name__)
                     self.root.after(0, lambda: self.status.set(label + "失敗：" + error + "。檢查憑證、模型、網路或配額。"))
                 return
@@ -312,31 +342,35 @@ class SetupWindow:
                 self.root.after(0, lambda: done(result))
         threading.Thread(target=worker, daemon=True).start()
 
-    def test_gemini(self):
+    def test_provider(self):
+        label = self.vars["provider"].get()
+        kind = PROVIDER_LABELS[label]
+        key_env = PROVIDER_KEYS[kind]
         model = self.vars["model"].get().strip()
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", model):
-            messagebox.showerror("缺少模型", "先填 AI Studio 的模型 ID。")
+            messagebox.showerror("缺少模型", "先填所選 AI API 的完整模型 ID。")
             return
-        key = self.vars["gemini_key"].get().strip() or os.environ.get("GEMINI_API_KEY", "")
+        key = self.vars["api_key"].get().strip() or os.environ.get(key_env, "")
         if not key:
-            messagebox.showerror("缺少金鑰", "先填 Gemini API key。")
+            messagebox.showerror("缺少金鑰", "先填 " + label + " API key。")
             return
         def call():
-            os.environ["GEMINI_API_KEY"] = key
-            cfg = initial_config()["provider"] | {"model": model, "enabled": True, "api_key_env": "GEMINI_API_KEY"}
-            store = Store(ROOT / "runtime" / "shared-api.sqlite")
+            os.environ[key_env] = key
+            cfg = initial_config()["provider"] | {"kind": kind, "model": model, "enabled": True, "api_key_env": key_env}
+            store = Store(ROOT / "runtime" / ("shared-openai-api.sqlite" if kind == "openai" else "shared-api.sqlite"))
             try:
-                result = Gemini(cfg, store).call("chat", {"question": "請回覆連線成功。沒有行情資料，不作交易判斷。"})
+                result = build_provider(cfg, store).call("chat", {"question": "請回覆連線成功。沒有行情資料，不作交易判斷。"})
                 if not isinstance(result.get("answer"), str) or not result["answer"].strip():
                     raise ValueError("沒有有效回答")
-                return model
+                return kind, model
             finally:
                 store.db.close()
-        def done(checked_model):
-            if self.vars["model"].get().strip() == checked_model and self.vars["gemini_key"].get().strip() in {"", key}:
-                self.gemini_ok = True
-                self.status.set("Gemini 連線成功。按「儲存設定」後會啟用 Gemini。")
-        self._run("Gemini", call, done)
+        def done(checked):
+            if (self.vars["provider"].get() == label and self.vars["model"].get().strip() == checked[1]
+                    and self.vars["api_key"].get().strip() in {"", key}):
+                self.provider_ok = True
+                self.status.set(label + " 連線成功。按「儲存設定」後才會切換供應商。")
+        self._run(label, call, done)
 
     def test_telegram(self):
         token = self.vars["telegram_token"].get().strip() or os.environ.get("AI_TRADER_TELEGRAM_TOKEN", "")
@@ -384,9 +418,10 @@ class SetupWindow:
                     raise ValueError("此帳號已綁定「"+("實盤" if saved_mode == "real" else "模擬")+"」；請用『新增帳號』加入另一個 MT5 帳號")
             cfg = save_form(target, account, server,
                             self.vars["model"].get().strip(), self.vars["user_id"].get().strip(),
-                            self.gemini_ok, self.telegram_ok, self.vars["gemini_key"].get(), self.vars["telegram_token"].get(),
+                            self.provider_ok, self.telegram_ok, self.vars["api_key"].get(), self.vars["telegram_token"].get(),
                             self.vars["symbols"].get(), self.vars["commissions"].get(), secrets_path=SECRETS,
-                            account_mode=account_mode, live_enabled=live_enabled)
+                            account_mode=account_mode, live_enabled=live_enabled,
+                            provider_kind=PROVIDER_LABELS[self.vars["provider"].get()])
             if self.new_account:
                 self.registry["profiles"][identifier] = str(target.relative_to(ROOT / "config")).replace("\\", "/")
             self.registry["shared_profile"] = identifier
@@ -398,15 +433,15 @@ class SetupWindow:
             self.account_choice.set(self.account_labels[identifier])
             self.account_box.configure(values=list(self.account_labels.values()))
             load_into_environment(CONFIG)
-            self.vars["gemini_key"].set("")
+            self.vars["api_key"].set("")
             self.vars["telegram_token"].set("")
             # Clearing masked fields after save is a UI action, not a credential change.
-            self.gemini_ok = cfg["provider"]["enabled"]
+            self.provider_ok = cfg["provider"]["enabled"]
             self.telegram_ok = cfg["telegram"]["enabled"]
         except Exception as exc:
             messagebox.showerror("設定未儲存", str(exc) if isinstance(exc, ValueError) else type(exc).__name__)
             return False
-        self.status.set("多帳號設定已儲存。請在此帳號 MT5 視窗重新掛載新版 EA，服務重啟後套用。Gemini="+str(self.gemini_ok)+"，Telegram="+str(self.telegram_ok)+"。")
+        self.status.set("多帳號設定已儲存。服務重啟後共用 AI API 會切換為 "+self.vars["provider"].get()+"；飛機="+str(self.telegram_ok)+"。")
         return True
 
     def check_mt5(self):
@@ -463,7 +498,7 @@ class SetupWindow:
                 return
             _, profiles = load_profiles(ROOT)
             if not next(iter(profiles.values()))["provider"]["enabled"]:
-                raise ValueError("請先成功測試 Gemini，然後儲存設定")
+                raise ValueError("請先成功測試所選 AI API，然後儲存設定")
             root = ROOT / "runtime"
             root.mkdir(exist_ok=True)
             with ExitStack() as locks:

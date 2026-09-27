@@ -1,7 +1,7 @@
 # Run locally. Inputs are hidden and never echoed or written to project files.
 param([switch]$SessionOnly)
 $ErrorActionPreference = 'Stop'
-foreach ($entry in @(@('GEMINI_API_KEY', 'Gemini API key'), @('AI_TRADER_TELEGRAM_TOKEN', 'Telegram bot token'))) {
+foreach ($entry in @(@('GEMINI_API_KEY', 'Gemini API key'), @('OPENAI_API_KEY', 'OpenAI API key'), @('AI_TRADER_TELEGRAM_TOKEN', 'Telegram bot token'))) {
     $secret = Read-Host "$($entry[1]) (blank to keep existing)" -AsSecureString
     if ($secret.Length -eq 0) { continue }
     $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)

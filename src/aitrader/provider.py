@@ -183,7 +183,96 @@ class AIProvider(Protocol):
     def call(self, kind: str, payload: dict) -> dict: ...
 
 
-ADAPTERS = {"gemini": Gemini}
+class OpenAI:
+    """Stateless Responses API adapter; never enables tools or stores a response."""
+
+    def __init__(self, config, store, transport=request_json, quota_store=None):
+        self.config, self.store, self.transport = config, store, transport
+        self.quota_store = quota_store or store
+
+    def call(self, kind, payload):
+        cfg = self.config
+        if not cfg.get("enabled") or not re.fullmatch(r"[A-Za-z0-9_.-]+", cfg.get("model", "")):
+            raise ValueError("OpenAI disabled or model not configured")
+        key = os.environ.get(cfg["api_key_env"])
+        if not key:
+            raise ValueError("OpenAI key environment variable missing")
+        now = time.time()
+        call_id = self.quota_store.reserve_call(kind, cfg, now)
+        prompts = {"strategy": STRATEGY, "decisions": DECISIONS,
+                   "chat": '只讀查詢。根據提供的實際狀態回答，不提出操作。回覆 {"answer":"..."}。'}
+        try:
+            raw = self.transport(
+                "https://api.openai.com/v1/responses",
+                {"model": cfg["model"], "instructions": SYSTEM + "\n" + prompts[kind],
+                 "input": dumps(payload), "text": {"format": {"type": "json_object"}},
+                 "max_output_tokens": cfg["max_output_tokens"], "store": False},
+                {"Authorization": "Bearer " + key}, cfg["timeout_seconds"])
+            if not isinstance(raw, dict):
+                raise ProviderResponseError("invalid_response", "OpenAI 回答格式不符；本次未採用。")
+            if raw.get("status") != "completed":
+                reason = (raw.get("incomplete_details") or {}).get("reason") if isinstance(raw.get("incomplete_details"), dict) else None
+                status = "max_tokens" if reason == "max_output_tokens" else "incomplete"
+                raise ProviderResponseError(status, "OpenAI 回答未完整結束；本次未採用。")
+            output = raw.get("output")
+            if not isinstance(output, list):
+                raise ProviderResponseError("empty_response", "OpenAI 回答沒有可用文字；本次未採用。")
+            texts = []
+            for item in output:
+                if not isinstance(item, dict) or item.get("type") != "message":
+                    continue
+                for part in item.get("content", []):
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") == "refusal":
+                        raise ProviderResponseError("blocked", "OpenAI 拒絕了這次回答；本次未採用。")
+                    if part.get("type") == "output_text" and isinstance(part.get("text"), str):
+                        texts.append(part["text"])
+            if not texts or not "".join(texts).strip():
+                raise ProviderResponseError("empty_response", "OpenAI 回答沒有可用文字；本次未採用。")
+            try:
+                result = json.loads("".join(texts))
+            except json.JSONDecodeError:
+                raise ProviderResponseError("invalid_json", "OpenAI 回答不是有效 JSON；本次未採用。") from None
+            if not isinstance(result, dict):
+                raise ProviderResponseError("not_object", "OpenAI 回答格式不符；本次未採用。")
+            with self.quota_store.db:
+                self.quota_store.db.execute("UPDATE calls SET status='ok',latency=?,usage=? WHERE id=?",
+                                            (time.time()-now, dumps(raw.get("usage", {})), call_id))
+            self.quota_store.set("provider_transient_failures:" + cfg["model"], 0)
+            self.quota_store.set("provider_transient_backoff_until:" + cfg["model"], 0)
+            self.store.event("provider_response", {"call_id": call_id, "kind": kind, "model": cfg["model"], "response": result})
+            return result
+        except Exception as exc:
+            error = type(exc).__name__
+            message = "OpenAI API 暫時無法使用；本次未採用。"
+            if isinstance(exc, urllib.error.HTTPError):
+                error = "http_" + str(exc.code)
+                hints = {400: "請求參數或模型不被接受", 401: "API key 無效", 403: "專案沒有此模型的使用權限",
+                         404: "模型 ID 不存在或端點無法使用", 429: "配額或限流", 500: "服務端暫時出錯",
+                         503: "服務暫時不可用"}
+                message = "OpenAI HTTP " + str(exc.code) + "：" + hints.get(exc.code, "請檢查模型、金鑰與專案") + "。"
+                if exc.code == 429:
+                    self.quota_store.set("provider_backoff_until", time.time()+900)
+                    error = "rate_limited"
+                elif exc.code in {408, 500, 502, 503, 504}:
+                    model = cfg["model"]
+                    prior = self.quota_store.get("provider_transient_backoff_until:" + model, 0)
+                    failures = 1 if time.time() > prior + 1800 else min(5, self.quota_store.get("provider_transient_failures:" + model, 0)+1)
+                    delay = min(900, 60 * 2**(failures-1))
+                    self.quota_store.set("provider_transient_failures:" + model, failures)
+                    self.quota_store.set("provider_transient_backoff_until:" + model, time.time()+delay)
+                    message += "已暫停新 API 呼叫約 " + str(delay) + " 秒"
+            elif isinstance(exc, ProviderResponseError):
+                error, message = exc.status, str(exc)
+            elif isinstance(exc, TimeoutError):
+                message = "OpenAI 回應逾時；本次未採用。"
+            with self.quota_store.db:
+                self.quota_store.db.execute("UPDATE calls SET status=?,latency=? WHERE id=?", (error, time.time()-now, call_id))
+            raise ValueError(message) from None
+
+
+ADAPTERS = {"gemini": Gemini, "openai": OpenAI}
 
 
 def build_provider(config: dict, store) -> AIProvider:

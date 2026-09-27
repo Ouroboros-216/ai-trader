@@ -4,7 +4,7 @@ import urllib.error
 
 import pytest
 
-from aitrader.provider import Gemini
+from aitrader.provider import Gemini, OpenAI
 from aitrader.telegram import Telegram
 
 
@@ -123,6 +123,51 @@ def test_provider_usage_recorded(agent, monkeypatch):
     assert client.call("chat", {}) == {"answer": "ok"}
     row = agent.store.db.execute("SELECT * FROM calls").fetchone()
     assert json.loads(row["usage"])["totalTokenCount"] == 50 and row["cost"] is None
+
+
+def test_openai_responses_adapter_is_stateless_and_records_usage(agent, monkeypatch):
+    monkeypatch.setenv("FAKE_OPENAI_KEY", "unit-test-openai-secret")
+    cfg = {"kind": "openai", "enabled": True, "model": "gpt-test", "api_key_env": "FAKE_OPENAI_KEY",
+           "timeout_seconds": 10, "max_calls_per_day": 10, "min_interval_seconds": 0, "max_output_tokens": 1000}
+    requests = []
+    def transport(url, body, headers, timeout):
+        requests.append((url, body, headers, timeout))
+        return {"status": "completed", "output": [{"type": "reasoning"},
+                {"type": "message", "content": [{"type": "output_text", "text": '{"answer":"ok"}'}]}],
+                "usage": {"input_tokens": 12, "output_tokens": 4}}
+    assert OpenAI(cfg, agent.store, transport).call("chat", {"question": "test"}) == {"answer": "ok"}
+    url, body, headers, timeout = requests[0]
+    assert url == "https://api.openai.com/v1/responses"
+    assert body["store"] is False and body["text"]["format"]["type"] == "json_object"
+    assert "tools" not in body and headers["Authorization"] == "Bearer unit-test-openai-secret"
+    assert json.loads(agent.store.db.execute("SELECT usage FROM calls").fetchone()[0])["input_tokens"] == 12
+
+
+@pytest.mark.parametrize("raw,status", [
+    ({"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}, "max_tokens"),
+    ({"status": "completed", "output": [{"type": "message", "content": [{"type": "refusal", "refusal": "no"}]}]}, "blocked"),
+    ({"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "not json"}]}]}, "invalid_json"),
+])
+def test_openai_unusable_response_cannot_become_decision(agent, monkeypatch, raw, status):
+    monkeypatch.setenv("FAKE_OPENAI_KEY", "private-key")
+    cfg = {"kind": "openai", "enabled": True, "model": "gpt-test", "api_key_env": "FAKE_OPENAI_KEY",
+           "timeout_seconds": 10, "max_calls_per_day": 10, "min_interval_seconds": 0, "max_output_tokens": 1000}
+    with pytest.raises(ValueError) as failure:
+        OpenAI(cfg, agent.store, lambda *_: raw).call("decisions", {"snapshot": {}})
+    assert "private-key" not in str(failure.value)
+    assert agent.store.db.execute("SELECT status FROM calls").fetchone()[0] == status
+
+
+def test_openai_http_error_does_not_expose_key_or_body(agent, monkeypatch):
+    monkeypatch.setenv("FAKE_OPENAI_KEY", "private-key")
+    cfg = {"kind": "openai", "enabled": True, "model": "gpt-test", "api_key_env": "FAKE_OPENAI_KEY",
+           "timeout_seconds": 10, "max_calls_per_day": 10, "min_interval_seconds": 0, "max_output_tokens": 1000}
+    def fail(*_):
+        raise urllib.error.HTTPError("https://example.test/private-key", 429, "private-key", {}, None)
+    with pytest.raises(ValueError, match="OpenAI HTTP 429") as failure:
+        OpenAI(cfg, agent.store, fail).call("chat", {})
+    assert "private-key" not in str(failure.value)
+    assert agent.store.get("provider_backoff_until") > time.time()
 
 
 @pytest.mark.parametrize("sender,chat,chat_type,age,accepted", [(7,7,"private",0,True), (8,7,"private",0,False), (7,8,"private",0,False), (7,7,"group",0,False), (7,7,"private",500,False)])
