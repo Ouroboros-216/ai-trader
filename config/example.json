@@ -1,0 +1,34 @@
+{
+  "bridge_dir": "%APPDATA%/MetaQuotes/Terminal/Common/Files/AITrader/demo-1",
+  "database": "../runtime/agent.sqlite",
+  "account": "",
+  "server": "",
+  "account_mode": "demo",
+  "live_enabled": false,
+  "magic": 26092751,
+  "ea": {
+    "symbols": "XAUUSD,EURUSD,GBPUSD",
+    "commission_round_turn": "-1",
+    "max_spread_points": "80,25,30",
+    "slippage_points": "10,3,3"
+  },
+  "provider": {
+    "kind": "gemini",
+    "enabled": false,
+    "model": "",
+    "api_key_env": "GEMINI_API_KEY",
+    "timeout_seconds": 30,
+    "max_calls_per_day": 100,
+    "min_interval_seconds": 15,
+    "max_output_tokens": 4096
+  },
+  "telegram": {
+    "enabled": false,
+    "token_env": "AI_TRADER_TELEGRAM_TOKEN",
+    "user_id": 0,
+    "chat_id": 0
+  },
+  "analysis_interval_seconds": 300,
+  "command_ttl_seconds": 60,
+  "snapshot_max_age_seconds": 15
+}

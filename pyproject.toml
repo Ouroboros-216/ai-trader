@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mt5-ai-trader"
+version = "0.8.4"
+description = "Independent multi-account MT5 LLM trading agent"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+ai-trader = "aitrader.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
