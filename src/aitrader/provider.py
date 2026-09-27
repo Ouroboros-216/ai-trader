@@ -33,6 +33,14 @@ def safe_http_error(code: int) -> str:
     return "Gemini HTTP " + str(code) + "：" + HTTP_HINTS.get(code, "請在 AI Studio 核對模型、金鑰與專案狀態。")
 
 
+class ProviderResponseError(ValueError):
+    """A fixed, safe diagnosis of an unusable model response."""
+
+    def __init__(self, status: str, message: str):
+        super().__init__(message)
+        self.status = status
+
+
 def request_json(url, body, headers=None, timeout=30):
     request = urllib.request.Request(url, data=dumps(body).encode(), headers={"Content-Type": "application/json"} | (headers or {}))
     with urllib.request.build_opener(NoRedirect).open(request, timeout=timeout) as response:
@@ -107,12 +115,30 @@ class Gemini:
                  "contents": [{"role": "user", "parts": [{"text": dumps(payload)}]}],
                  "generationConfig": generation},
                 {"x-goog-api-key": key}, cfg["timeout_seconds"])
-            candidate = raw["candidates"][0]
-            if candidate.get("finishReason") != "STOP":
-                raise ValueError("incomplete/refused response")
-            result = json.loads("".join(p.get("text", "") for p in candidate["content"]["parts"] if not p.get("thought")))
+            candidates = raw.get("candidates") if isinstance(raw, dict) else None
+            if not isinstance(candidates, list) or not candidates or not isinstance(candidates[0], dict):
+                raise ProviderResponseError("no_candidate", "Gemini 沒有提供可用回答；本次未採用。")
+            candidate = candidates[0]
+            finish = candidate.get("finishReason")
+            if finish == "MAX_TOKENS":
+                raise ProviderResponseError("max_tokens", "Gemini 回應達到輸出 token 上限（思考 token 也計入）；本次未採用。")
+            if finish in {"SAFETY", "RECITATION", "PROHIBITED_CONTENT", "SPII"}:
+                raise ProviderResponseError("blocked", "Gemini 拒絕或阻擋了這次回答；本次未採用。")
+            if finish != "STOP":
+                raise ProviderResponseError("incomplete", "Gemini 回答未完整結束；本次未採用。")
+            content = candidate.get("content")
+            parts = content.get("parts", []) if isinstance(content, dict) else []
+            if not isinstance(parts, list):
+                raise ProviderResponseError("empty_response", "Gemini 回答沒有可用文字；本次未採用。")
+            answer = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and not p.get("thought"))
+            if not answer.strip():
+                raise ProviderResponseError("empty_response", "Gemini 回答沒有可用文字；本次未採用。")
+            try:
+                result = json.loads(answer)
+            except json.JSONDecodeError:
+                raise ProviderResponseError("invalid_json", "Gemini 回答不是有效 JSON；本次未採用。") from None
             if not isinstance(result, dict):
-                raise ValueError("JSON object required")
+                raise ProviderResponseError("not_object", "Gemini 回答格式不符；本次未採用。")
             with self.quota_store.db:
                 self.quota_store.db.execute("UPDATE calls SET status='ok',latency=?,usage=? WHERE id=?", (time.time()-now, dumps(raw.get("usageMetadata", {})), call_id))
             self.quota_store.set("provider_transient_failures:" + cfg["model"], 0)
@@ -137,6 +163,17 @@ class Gemini:
                     self.quota_store.set("provider_transient_failures:" + model, failures)
                     self.quota_store.set("provider_transient_backoff_until:" + model, time.time()+delay)
                     message += "；已暫停新 API 呼叫約 " + str(delay) + " 秒"
+            elif isinstance(exc, ProviderResponseError):
+                error = exc.status
+                message = str(exc)
+            elif isinstance(exc, json.JSONDecodeError):
+                error = "response_not_json"
+                message = "Gemini 服務回傳內容不是有效 JSON；本次未採用。"
+            elif isinstance(exc, ValueError):
+                error = "value_error"
+                message = "API 請求資料或服務回應無效；本次未採用。"
+            elif isinstance(exc, TimeoutError):
+                message = "Gemini 回應逾時；本次未採用。"
             with self.quota_store.db:
                 self.quota_store.db.execute("UPDATE calls SET status=?,latency=? WHERE id=?", (error, time.time()-now, call_id))
             raise ValueError(message) from None

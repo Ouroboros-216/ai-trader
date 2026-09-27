@@ -104,6 +104,20 @@ def test_bad_provider_response(agent, monkeypatch, candidate):
         client.call("chat", {})
 
 
+@pytest.mark.parametrize("candidate,status,hint", [
+    ({"finishReason": "MAX_TOKENS"}, "max_tokens", "輸出 token 上限"),
+    ({"finishReason": "SAFETY"}, "blocked", "阻擋"),
+    ({"finishReason": "STOP", "content": {"parts": []}}, "empty_response", "沒有可用文字"),
+    ({"finishReason": "STOP", "content": {"parts": [{"text": "not json"}]}}, "invalid_json", "不是有效 JSON"),
+])
+def test_provider_reports_safe_specific_model_failure(agent, monkeypatch, candidate, status, hint):
+    client = provider(agent, monkeypatch, lambda *args: {"candidates": [candidate]}, 10)
+    with pytest.raises(ValueError, match=hint):
+        client.call("strategy", {"private": "do not repeat"})
+    row = agent.store.db.execute("SELECT status FROM calls").fetchone()
+    assert row[0] == status
+
+
 def test_provider_usage_recorded(agent, monkeypatch):
     client = provider(agent, monkeypatch, lambda *args: {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": '{"answer":"ok"}'}]}}], "usageMetadata": {"totalTokenCount": 50}})
     assert client.call("chat", {}) == {"answer": "ok"}

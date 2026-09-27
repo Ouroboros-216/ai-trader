@@ -10,7 +10,7 @@ try {
 from pathlib import Path
 import hashlib, json, sys, zipfile
 root = Path.cwd()
-target = root/'dist'/'AITrader-v0.8.4.zip'
+target = root/'dist'/'AITrader-v0.8.5.zip'
 files = [root/'README.md', root/'pyproject.toml', root/'config'/'example.json', *root.glob('*.cmd')]
 for directory in ('src', 'scripts', 'docs', 'tests', 'mql5'):
     files.extend(p for p in (root/directory).rglob('*') if p.is_file() and '__pycache__' not in p.parts and p.suffix not in {'.log','.pyc'})
