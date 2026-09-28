@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from aitrader.provider import CHAT
 from aitrader.bridge import atomic_write
 from aitrader.multi import AccountRouter
 from aitrader.storage import Store
@@ -47,6 +48,38 @@ def test_strategy_preview_is_readable_and_followup_discusses_pending_card(agent,
     assert agent.provider.calls[-1][0] == "chat"
     assert agent.provider.calls[-1][1]["pending_policy"]["title"] == policy["title"]
     assert agent.store.get("pending") == pending
+
+
+def test_strategy_question_is_discussion_not_a_change(agent, policy):
+    agent.provider.response = {"answer": "可以先比較剝頭皮的成本與 1% 單筆風險；目前策略仍是 0.5%。固定手數也可討論。"}
+    reply = agent.handle("我在想高頻剝頭皮每筆 1%，你覺得呢？")
+    assert "可以先比較" in reply
+    assert agent.provider.calls[-1][0] == "chat"
+    assert agent.store.get("policy") == policy
+    assert agent.store.db.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 0
+    assert "不能說「手數不能設定」" in CHAT and "M15 說成 H15" in CHAT
+
+
+def test_chat_remembers_discussion_and_explicit_request_creates_only_draft(agent, policy):
+    agent.provider.response = {"answer": "可考慮 XAUUSD 剝頭皮，但先定義成本與失效。"}
+    agent.handle("比較 XAUUSD 剝頭皮和原本結構策略")
+    agent.provider.response = {"policy": policy | {"title": "XAUUSD 剝頭皮", "risk_pct": 1.0}, "questions": []}
+    preview = agent.handle("整理成草案 XAUUSD 剝頭皮，每筆 1%")
+    assert "策略草案" in preview and "確認 " in preview
+    assert agent.provider.calls[-1][0] == "strategy"
+    request = agent.provider.calls[-1][1]
+    assert request["discussion_history"][0]["user"] == "比較 XAUUSD 剝頭皮和原本結構策略"
+    assert agent.store.get("policy") == policy
+    assert agent.store.get("paused", True) is True
+
+
+def test_colon_revision_works_on_confirmed_policy_without_pending_card(agent, policy):
+    agent.provider.response = {"policy": policy | {"risk_pct": 1.0}, "questions": []}
+    preview = agent.handle("修改：將單筆風險改為 1%")
+    assert "單筆 1.0%" in preview
+    assert agent.provider.calls[-1][0] == "strategy"
+    assert agent.store.get("policy") == policy
+    assert agent.store.get("paused", True) is True
 
 
 def test_modify_pending_card_creates_new_confirmation_without_applying(agent, snapshot, policy):
