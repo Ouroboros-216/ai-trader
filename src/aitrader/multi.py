@@ -472,6 +472,7 @@ class MultiTelegram(Telegram):
             for row in rows:
                 self.call("sendMessage", {"chat_id": self.config["chat_id"], "text": "【" + self.agent.account_label(identifier) + "】交易回報：" + row["data"][:2900]})
                 store.set("telegram_event_cursor", row["id"])
+            self.notify_openings(store, self.agent.account_label(identifier))
 
 
 def tick_agent(agent):

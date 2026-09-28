@@ -3,6 +3,7 @@ $root = Split-Path $PSScriptRoot -Parent
 $output = Join-Path $root 'dist'
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 $pythonExe = Join-Path (Split-Path $root -Parent) '.venv\Scripts\python.exe'
+if (!(Test-Path -LiteralPath $pythonExe)) { $pythonExe = Join-Path $root '.venv\Scripts\python.exe' }
 if (!(Test-Path -LiteralPath $pythonExe)) { $pythonExe = 'python' }
 Push-Location -LiteralPath $root
 try {
@@ -10,7 +11,7 @@ try {
 from pathlib import Path
 import hashlib, json, sys, zipfile
 root = Path.cwd()
-target = root/'dist'/'AITrader-v0.8.20.zip'
+target = root/'dist'/'AITrader-v0.8.21.zip'
 binary = root/'mql5'/'AITrader.ex5'
 if not binary.is_file(): raise SystemExit('Compile AITrader.ex5 before packaging')
 files = [root/'README.md', root/'pyproject.toml', root/'config'/'example.json', *root.glob('*.cmd')]

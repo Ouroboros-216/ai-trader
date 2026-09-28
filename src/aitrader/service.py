@@ -15,7 +15,7 @@ from .storage import Store, dumps
 from .symbols import ambiguous_choice, catalog, relevant
 from .watch import WatchCandidate
 
-REQUIRED_EA_VERSION = "1.011"
+REQUIRED_EA_VERSION = "1.012"
 
 
 def load_config(path):
@@ -361,7 +361,7 @@ class Agent:
               risk_change=None, discussion_context=False, required_timeframes=()):
         snapshot = self.snapshot()
         if snapshot.get("ea_version") != REQUIRED_EA_VERSION:
-            raise ValueError("請先在 MT5 重新掛載 v1.011 EA，再建立策略")
+            raise ValueError("請先在 MT5 重新掛載 v1.012 EA，再建立策略")
         current = self.policy()
         # A strategy draft needs historical bars, not a live quote or known commission.
         # The latter are mandatory only when the account is resumed and an entry is sent.
@@ -480,7 +480,7 @@ class Agent:
         elif row["kind"] == "resume":
             snapshot = self.snapshot()
             if snapshot.get("ea_version") != REQUIRED_EA_VERSION:
-                raise ValueError("請先在 MT5 重新掛載 v1.011 EA，再啟動新單")
+                raise ValueError("請先在 MT5 重新掛載 v1.012 EA，再啟動新單")
             p = self.policy()
             if self.cfg.get("account_mode", "demo") == "real" and not self.cfg.get("live_enabled", False):
                 raise ValueError("此實盤帳號尚未授權自動新單")

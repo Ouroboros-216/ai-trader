@@ -1,13 +1,42 @@
 import os
 import re
 import time
+import json
+import math
 
 from .provider import request_json
+
+
+def opening_deal_message(deal, account_label):
+    """Only a fresh broker entry made with this EA's magic is an opening alert."""
+    if (not isinstance(deal, dict) or deal.get("opening") is not True or
+        deal.get("ai_order") is not True or deal.get("side") not in {"BUY", "SELL"}):
+        return None
+    age = deal.get("age_seconds")
+    volume, price = deal.get("volume"), deal.get("price")
+    symbol, identifier = deal.get("symbol"), deal.get("deal")
+    if (type(age) not in (int, float) or not 0 <= age <= 300 or
+        type(volume) not in (int, float) or not math.isfinite(volume) or volume <= 0 or
+        type(price) not in (int, float) or not math.isfinite(price) or price <= 0 or
+        not isinstance(symbol, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", symbol) or
+        not isinstance(identifier, str) or not identifier.isdecimal()):
+        return None
+    side = "買入" if deal["side"] == "BUY" else "賣出"
+    return ("【" + account_label + "】本系統開倉成交\n" + symbol + " " + side + " " +
+            format(volume, ".8g") + " 手，成交價 " + format(price, ".10g") +
+            "\n成交單號：" + identifier)
 
 
 class Telegram:
     def __init__(self, config, agent, transport=request_json):
         self.config, self.agent, self.transport = config, agent, transport
+        if config.get("enabled"):
+            agents = agent.agents.values() if hasattr(agent, "agents") else (agent,)
+            for current in agents:
+                store = current.store
+                if store.get("telegram_open_cursor", None) is None:
+                    latest = store.db.execute("SELECT COALESCE(MAX(id),0) FROM events").fetchone()[0]
+                    store.set("telegram_open_cursor", latest)
 
     def call(self, method, payload):
         token = os.environ.get(self.config["token_env"], "")
@@ -71,3 +100,13 @@ class Telegram:
         for row in rows:
             self.call("sendMessage", {"chat_id": self.config["chat_id"], "text": "交易回報："+row["data"][:3000]})
             store.set("telegram_event_cursor", row["id"])
+        self.notify_openings(store, self.agent.cfg["server"] + "｜" + self.agent.cfg["account"])
+
+    def notify_openings(self, store, account_label):
+        cursor = store.get("telegram_open_cursor", 0)
+        rows = store.db.execute("SELECT id,data FROM events WHERE id>? AND kind='deal' ORDER BY id LIMIT 10", (cursor,)).fetchall()
+        for row in rows:
+            message = opening_deal_message(json.loads(row["data"]), account_label)
+            if message:
+                self.call("sendMessage", {"chat_id": self.config["chat_id"], "text": message})
+            store.set("telegram_open_cursor", row["id"])

@@ -1,5 +1,5 @@
 #property strict
-#property version "1.011"
+#property version "1.012"
 #property description "Independent AI operator with exact account-mode binding. Python bridge required."
 
 // Self-contained execution wrapper: no terminal-local include dependency.
@@ -485,7 +485,7 @@ string Bars(string symbol,ENUM_TIMEFRAMES tf,bool &ready)
 }
 void Snapshot()
 {
-   string out="{\"schema\":1,\"ea_version\":\"1.011\",\"account\":"+J(Account())+",\"server\":"+J(Server())+",\"magic\":"+(string)InpMagic+",\"demo\":"+Bool(IsDemo())+",\"account_mode\":"+J(bound_mode)+",\"live_enabled\":"+Bool(live_allowed)+",\"time\":"+(string)Now()+",\"equity\":"+Num(AccountInfoDouble(ACCOUNT_EQUITY))+",\"balance\":"+Num(AccountInfoDouble(ACCOUNT_BALANCE))+",\"currency\":"+J(AccountInfoString(ACCOUNT_CURRENCY))+",\"state_ok\":"+Bool(state_ok)+",\"halted\":"+Bool(daily_halt||total_halt||!state_ok)+",\"daily_halt\":"+Bool(daily_halt)+",\"total_halt\":"+Bool(total_halt)+",\"local_pause\":"+Bool(local_pause)+",\"missing_symbols\":["+missing+"],\"positions\":[";
+   string out="{\"schema\":1,\"ea_version\":\"1.012\",\"account\":"+J(Account())+",\"server\":"+J(Server())+",\"magic\":"+(string)InpMagic+",\"demo\":"+Bool(IsDemo())+",\"account_mode\":"+J(bound_mode)+",\"live_enabled\":"+Bool(live_allowed)+",\"time\":"+(string)Now()+",\"equity\":"+Num(AccountInfoDouble(ACCOUNT_EQUITY))+",\"balance\":"+Num(AccountInfoDouble(ACCOUNT_BALANCE))+",\"currency\":"+J(AccountInfoString(ACCOUNT_CURRENCY))+",\"state_ok\":"+Bool(state_ok)+",\"halted\":"+Bool(daily_halt||total_halt||!state_ok)+",\"daily_halt\":"+Bool(daily_halt)+",\"total_halt\":"+Bool(total_halt)+",\"local_pause\":"+Bool(local_pause)+",\"missing_symbols\":["+missing+"],\"positions\":[";
    int count=0;
    for(int i=0;i<PositionsTotal();i++)
    {
@@ -541,7 +541,13 @@ void ExportDeals()
       if(!ours) continue;
       string marker="deal-"+(string)deal+".seen";
       if(FileIsExist(base+marker,FILE_COMMON)) continue;
-      string row="{\"account\":"+J(Account())+",\"server\":"+J(Server())+",\"deal\":"+J((string)deal)+",\"position_id\":"+J((string)HistoryDealGetInteger(deal,DEAL_POSITION_ID))+",\"time_server\":"+(string)HistoryDealGetInteger(deal,DEAL_TIME)+",\"observed_utc\":"+(string)Now()+",\"entry\":"+(string)HistoryDealGetInteger(deal,DEAL_ENTRY)+",\"symbol\":"+J(HistoryDealGetString(deal,DEAL_SYMBOL))+",\"volume\":"+Num(HistoryDealGetDouble(deal,DEAL_VOLUME))+",\"profit\":"+Num(HistoryDealGetDouble(deal,DEAL_PROFIT))+",\"commission\":"+Num(HistoryDealGetDouble(deal,DEAL_COMMISSION))+",\"swap\":"+Num(HistoryDealGetDouble(deal,DEAL_SWAP))+",\"fee\":"+Num(HistoryDealGetDouble(deal,DEAL_FEE))+"}";
+      ENUM_DEAL_ENTRY entry_kind=(ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal,DEAL_ENTRY);
+      ENUM_DEAL_TYPE deal_type=(ENUM_DEAL_TYPE)HistoryDealGetInteger(deal,DEAL_TYPE);
+      bool opening=(entry_kind==DEAL_ENTRY_IN||entry_kind==DEAL_ENTRY_INOUT);
+      bool ai_order=(ulong)HistoryDealGetInteger(deal,DEAL_MAGIC)==InpMagic;
+      string side=deal_type==DEAL_TYPE_BUY?"BUY":deal_type==DEAL_TYPE_SELL?"SELL":"";
+      long age_seconds=(long)TimeCurrent()-(long)HistoryDealGetInteger(deal,DEAL_TIME);
+      string row="{\"account\":"+J(Account())+",\"server\":"+J(Server())+",\"deal\":"+J((string)deal)+",\"position_id\":"+J((string)HistoryDealGetInteger(deal,DEAL_POSITION_ID))+",\"time_server\":"+(string)HistoryDealGetInteger(deal,DEAL_TIME)+",\"observed_utc\":"+(string)Now()+",\"entry\":"+(string)entry_kind+",\"opening\":"+Bool(opening)+",\"ai_order\":"+Bool(ai_order)+",\"side\":"+J(side)+",\"price\":"+Num(HistoryDealGetDouble(deal,DEAL_PRICE))+",\"age_seconds\":"+(string)age_seconds+",\"symbol\":"+J(HistoryDealGetString(deal,DEAL_SYMBOL))+",\"volume\":"+Num(HistoryDealGetDouble(deal,DEAL_VOLUME))+",\"profit\":"+Num(HistoryDealGetDouble(deal,DEAL_PROFIT))+",\"commission\":"+Num(HistoryDealGetDouble(deal,DEAL_COMMISSION))+",\"swap\":"+Num(HistoryDealGetDouble(deal,DEAL_SWAP))+",\"fee\":"+Num(HistoryDealGetDouble(deal,DEAL_FEE))+"}";
       if(Append("deals.jsonl",row)) WriteAtomic(marker,"1");
    }
 }

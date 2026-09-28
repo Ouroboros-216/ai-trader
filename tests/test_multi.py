@@ -139,6 +139,39 @@ def test_telegram_router_keeps_account_with_confirmation(tmp_path):
     assert not b.messages
 
 
+def test_opening_alerts_are_per_account_and_only_for_fresh_ea_fills(tmp_path, monkeypatch):
+    monkeypatch.setenv("TG_TEST", "123:unit-test-token")
+    first = FakeAgent("101", tmp_path / "a.sqlite")
+    second = FakeAgent("202", tmp_path / "b.sqlite")
+    first.cfg["server"] = "Broker-A"
+    second.cfg["server"] = "Broker-B"
+    first.store.event("deal", {"deal": "1", "opening": True, "ai_order": True})
+    router = AccountRouter({"a": first, "b": second}, Store(tmp_path / "router.sqlite"))
+    sent = []
+    def transport(url, body, **_):
+        sent.append(body)
+        return {"ok": True, "result": {}}
+    cfg = {"enabled": True, "token_env": "TG_TEST", "chat_id": 7}
+    bot = MultiTelegram(cfg, router, transport)
+    deal = {"opening": True, "ai_order": True, "side": "BUY", "age_seconds": 2,
+            "symbol": "XAUUSD", "volume": 0.03, "price": 4300.12, "deal": "123"}
+    first.store.event("deal", deal)
+    first.store.event("deal", deal | {"deal": "124", "opening": False})
+    first.store.event("deal", deal | {"deal": "125", "ai_order": False})
+    first.store.event("deal", deal | {"deal": "126", "age_seconds": 301})
+    second.store.event("deal", deal | {"deal": "456", "side": "SELL"})
+    bot.notify_changes()
+    assert len(sent) == 2
+    assert "【Broker-A｜101】本系統開倉成交" in sent[0]["text"]
+    assert "XAUUSD 買入 0.03 手，成交價 4300.12" in sent[0]["text"]
+    assert "成交單號：123" in sent[0]["text"]
+    assert "【Broker-B｜202】本系統開倉成交" in sent[1]["text"]
+    assert "賣出" in sent[1]["text"]
+    bot.notify_changes()
+    MultiTelegram(cfg, router, transport).notify_changes()
+    assert len(sent) == 2
+
+
 def test_router_error_identifies_account(tmp_path):
     agent = FakeAgent("101", tmp_path / "a.sqlite")
     router = AccountRouter({"demo-a": agent}, Store(tmp_path / "router.sqlite"))

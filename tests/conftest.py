@@ -19,7 +19,7 @@ def policy():
 
 @pytest.fixture
 def snapshot():
-    return {"schema": 1, "ea_version": "1.011", "account": "12345", "server": "TEST-Demo", "magic": 26092751, "demo": True,
+    return {"schema": 1, "ea_version": "1.012", "account": "12345", "server": "TEST-Demo", "magic": 26092751, "demo": True,
             "time": int(time.time()), "equity": 10000, "balance": 10000, "currency": "USD", "state_ok": True, "halted": False,
             "positions": [], "symbols": {"XAUUSD": {"ready": True, "bid": 3000, "ask": 3000.2},
                                         "EURUSD": {"ready": True, "bid": 1.1, "ask": 1.1001}}}
