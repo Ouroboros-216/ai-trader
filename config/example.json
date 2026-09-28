@@ -20,6 +20,7 @@
     "timeout_seconds": 30,
     "strategy_timeout_seconds": 120,
     "max_calls_per_day": 100,
+    "max_tokens_per_day": 250000,
     "min_interval_seconds": 15,
     "max_output_tokens": 4096
   },
@@ -29,7 +30,8 @@
     "user_id": 0,
     "chat_id": 0
   },
-  "analysis_interval_seconds": 300,
+  "analysis_interval_seconds": 900,
+  "watch_schedule_version": 1,
   "command_ttl_seconds": 60,
   "snapshot_max_age_seconds": 15
 }

@@ -96,7 +96,7 @@ market_context.ready=false 可能只是休市、報價過期或佣金未知；�
 市場資料不足時提出問題或保留觀望條件，不得宣稱持續自我訓練或保證獲利。"""
 
 DECISIONS = """根據已確認 policy、當下 snapshot 與記憶分析，不能修改策略。
-回覆 {"decisions":[{action,symbol,reason,invalidation,management,sl,tp,position_id,reverse_to}]}。
+回覆 {"decisions":[{action,symbol,reason,invalidation,management,sl,tp,position_id,reverse_to}],"watches":[]}。
 action 只能 WAIT/HOLD/BUY/SELL/CLOSE/TIGHTEN/REVERSE，每商品最多一個決策。
 position_id 是持倉 id 字串（非 ticket）；新單填 "0"。REVERSE 的 reverse_to 為 BUY 或 SELL，其他填空字串。
 BUY/SELL/REVERSE 必須給絕對價格 sl、tp、失效條件及管理計畫。TIGHTEN 只能收緊 SL，不能改 TP。
@@ -107,11 +107,25 @@ BUY/SELL/REVERSE 必須給絕對價格 sl、tp、失效條件及管理計畫。T
 new_entries_paused=true 時只允許 WAIT/HOLD/CLOSE/TIGHTEN，持倉管理繼續但禁止反手與新單。
 同一商品已有其他系統或人工持倉不得進場，不得管理 owned=false 的持倉。
 bars 的 time 是券商伺服器時間，snapshot.time 為 UTC，不可混作新聞事件時間。
+snapshot.bars 的 K 棒為已完成 K 棒；每根數值陣列依 snapshot.bar_fields 排列。不得將缺少的較早 K 棒當作不存在的行情。
+已有 active_watches 的商品由本機監看，勿重複提出同商品的 watch 或新單；持倉管理仍可提出 CLOSE/TIGHTEN。
 資料 incomplete/ready=false 或無法判斷時只能 WAIT。若已確認策略允許多種方法，理由須指出本輪採用的方法與行情依據；
 只能在策略卡寫明的方法與條件內擇優，不能自行增加新方法或修改風控。"""
 
+WATCH_GUIDE = """尚未符合進場條件、但有明確可量化的候選機會時，可在 watches 放入每商品最多一個待監看條件；沒有就給空陣列。
+每筆 watch 必須有 symbol,basis(QUOTE 或 CLOSE),timeframe(已確認策略週期),trigger_operator(ABOVE/BELOW),trigger_price,
+invalidation_operator(ABOVE/BELOW),invalidation_price,expires(UTC Unix 秒),reason,decision。
+decision 是條件觸發後才可能執行的 BUY/SELL 提案，須含完整 reason,invalidation,management,sl,tp,position_id="0",reverse_to=""。
+價格門檻只能根據提供的已完成 K 棒或報價提出；到價並不直接下單，屆時 AI 仍會依最新行情複核整套策略條件。
+不符合 immediate BUY/SELL 但能定義明確門檻時才建立 watch；已達門檻不要建立 watch。CLOSE 表示新完成 K 棒的收盤價，QUOTE 表示即時報價。
+失效或到期時程式先取消舊機會，再請 AI 重新尋找；不能把舊機會當成有效進場。
+如果策略條件無法寫成明確價格、收棒與期限門檻，請勿輸出 watch；可繼續觀望。"""
+
+DECISIONS += "\n" + WATCH_GUIDE
+
 ENTRY_REVIEW = """這是新單送往 MT5 前的最後一次 AI 條件複核，不是重新設計交易。
 僅依已確認 policy、候選 decision 與最新 snapshot，逐項判斷候選方向、進場方法、已完成 K 棒觸發、失效條件、停損與目標是否仍符合策略。
+snapshot.bars 的 K 棒數值陣列依 snapshot.bar_fields 排列；不得假設較早的資料仍在本次請求中。
 如價格、已完成 K 棒、點差、佣金或持倉資料不足，或無法證實任何必要條件，必須拒絕。
 不得修改候選商品、方向、停損、目標或手數；不能自行補造尚未提供的資訊。
 只回覆 {"allow":true/false,"reason":"繁體中文具體理由"}。有疑義時 allow=false。"""

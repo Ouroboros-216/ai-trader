@@ -87,11 +87,16 @@ def bridge_relative(value: str) -> str:
     return suffix.replace("/", "\\")
 
 
+def visible_analysis_minutes(config: dict) -> int:
+    seconds = config.get("analysis_interval_seconds", 900)
+    return 15 if config.get("watch_schedule_version", 0) < 1 and seconds == 300 else seconds // 60
+
+
 def save_form(config_path: Path, account: str, server: str, model: str, user_id: str,
               gemini_ok: bool, telegram_ok: bool, new_key: str, new_token: str,
               symbols: str = "AUTO", commissions: str = "-1",
               secrets_path: Path | None = None, account_mode: str = "demo", live_enabled: bool = False,
-              provider_kind: str = "gemini") -> dict:
+              provider_kind: str = "gemini", analysis_minutes: str | int | None = None) -> dict:
     valid_form(account, server, model, user_id)
     if provider_kind not in ADAPTERS:
         raise ValueError("不支援此 AI API")
@@ -99,6 +104,12 @@ def save_form(config_path: Path, account: str, server: str, model: str, user_id:
         raise ValueError("帳戶模式或實盤授權設定無效")
     symbols, commissions = valid_ea(symbols, commissions)
     config = json.loads((config_path if config_path.exists() else config_path.with_name("example.json")).read_text(encoding="utf-8-sig"))
+    if analysis_minutes is not None:
+        minutes = str(analysis_minutes).strip()
+        if not minutes.isdecimal() or not 1 <= int(minutes) <= 1440:
+            raise ValueError("AI 尋找新機會的間隔須為 1 至 1440 分鐘")
+        config["analysis_interval_seconds"] = int(minutes) * 60
+        config["watch_schedule_version"] = 1
     bridge_input = bridge_relative(config["bridge_dir"])
     bridge_root = Path(os.path.expandvars(config["bridge_dir"]))
     if not bridge_root.is_absolute():
@@ -168,6 +179,7 @@ class SetupWindow:
             "symbols": tk.StringVar(value=config.get("ea", {}).get("symbols", "AUTO")),
             "commissions": tk.StringVar(value=config.get("ea", {}).get("commission_round_turn", "-1")),
             "account_mode": tk.StringVar(value="實盤" if config.get("account_mode", "demo") == "real" else "模擬"),
+            "analysis_minutes": tk.StringVar(value=str(visible_analysis_minutes(config))),
             "provider": tk.StringVar(value=current_label),
             "model": tk.StringVar(value=shared_config["provider"].get("model", "")),
             "api_key": tk.StringVar(),
@@ -226,6 +238,7 @@ class SetupWindow:
         ttk.Label(frame, text="帳戶類型").grid(row=4, column=0, sticky="w", padx=(0, 10), pady=5)
         self.mode_box = ttk.Combobox(frame, textvariable=self.vars["account_mode"], values=["模擬", "實盤"], state="readonly", width=16)
         self.mode_box.grid(row=4, column=1, sticky="w", pady=5)
+        self._field(frame, 5, "AI 尋找新機會間隔（分鐘）", "analysis_minutes")
         ttk.Label(frame, text="交易商品由 MT5『市場報價』手動顯示；EA 只分析這些商品，不會自動加入預設商品。", wraplength=730).grid(row=6, column=0, columnspan=3, sticky="w", pady=5)
         self._field(frame, 7, "每手開平合計佣金", "commissions")
         ttk.Label(frame, text="佣金填一個數值套用此帳戶全部商品；未知填 -1。可先接 MT5 再讀取券商規則。", wraplength=730).grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 8))
@@ -276,6 +289,7 @@ class SetupWindow:
         self.vars["account"].set("")
         self.vars["server"].set("")
         self.vars["account_mode"].set("模擬")
+        self.vars["analysis_minutes"].set("15")
         self.status.set("填入新帳號、伺服器、帳戶類型與佣金，再按『儲存設定』。現有帳號資料不變。")
 
     def _choose_account(self, *_):
@@ -293,6 +307,7 @@ class SetupWindow:
                   "model": shared["provider"]["model"],
                   "provider": next((label for label, kind in PROVIDER_LABELS.items() if kind == shared["provider"].get("kind", "gemini")), "Gemini"),
                   "account_mode": "實盤" if config.get("account_mode", "demo") == "real" else "模擬",
+                  "analysis_minutes": str(visible_analysis_minutes(config)),
                   "user_id": str(shared["telegram"].get("user_id") or "")}
         for name, value in values.items():
             self.vars[name].set(value)
@@ -422,7 +437,8 @@ class SetupWindow:
                             self.provider_ok, self.telegram_ok, self.vars["api_key"].get(), self.vars["telegram_token"].get(),
                             self.vars["symbols"].get(), self.vars["commissions"].get(), secrets_path=SECRETS,
                             account_mode=account_mode, live_enabled=live_enabled,
-                            provider_kind=PROVIDER_LABELS[self.vars["provider"].get()])
+                            provider_kind=PROVIDER_LABELS[self.vars["provider"].get()],
+                            analysis_minutes=self.vars["analysis_minutes"].get())
             if self.new_account:
                 self.registry["profiles"][identifier] = str(target.relative_to(ROOT / "config")).replace("\\", "/")
             self.registry["shared_profile"] = identifier

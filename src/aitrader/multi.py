@@ -206,6 +206,8 @@ class AccountRouter:
             for item in plan:
                 agent = self.agents[item["account_id"]]
                 agent.store.set("policy", item["policy"])
+                agent.clear_watches()
+                agent.store.set("last_analysis", 0)
                 agent.store.event("confirmed", {"batch_id": proposal, "kind": "policy", "policy": item["policy"]})
                 agent.publish()
                 applied.append(item["account_id"])

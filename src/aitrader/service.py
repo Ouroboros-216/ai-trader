@@ -13,6 +13,7 @@ from .contracts import DecisionProposal, ExecutionResult, MarketSnapshot, Strate
 from .provider import ADAPTERS, build_provider
 from .storage import Store, dumps
 from .symbols import ambiguous_choice, catalog, relevant
+from .watch import WatchCandidate
 
 REQUIRED_EA_VERSION = "1.011"
 
@@ -20,6 +21,8 @@ REQUIRED_EA_VERSION = "1.011"
 def load_config(path):
     path = Path(path).resolve()
     cfg = json.loads(path.read_text(encoding="utf-8-sig"))
+    if cfg.get("watch_schedule_version", 0) < 1 and cfg.get("analysis_interval_seconds") == 300:
+        cfg["analysis_interval_seconds"] = 900  # Migrate the former default without editing user files.
     for key in ("bridge_dir", "database"):
         value = Path(os.path.expandvars(cfg[key]))
         cfg[key] = str(value if value.is_absolute() else (path.parent / value).resolve())
@@ -46,6 +49,7 @@ def load_config(path):
     if p.get("api_key_env") != {"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY"}[p["kind"]]:
         raise ValueError("AI API 金鑰來源與所選供應商不一致")
     number(p["max_calls_per_day"], 1, 10000)
+    number(p.get("max_tokens_per_day", 250000), 1000, 100000000)
     number(p["min_interval_seconds"], 1, 3600)
     number(p["timeout_seconds"], 1, 60)
     if p["kind"] == "openai":
@@ -76,6 +80,62 @@ class Agent:
 
     def snapshot(self):
         return MarketSnapshot.parse(self.bridge.json("snapshot.json"), self.cfg["account"], self.cfg["server"], self.cfg["magic"], time.time(), self.cfg["snapshot_max_age_seconds"], self.cfg.get("account_mode", "demo")).data
+
+    @staticmethod
+    def ai_snapshot(snapshot, policy):
+        """Only strategy symbols and bounded completed bars cross the AI API."""
+        fields = ("time", "open", "high", "low", "close", "volume")
+        limits = {"M5": 20, "M15": 24, "H1": 16, "H4": 10}
+        symbols = {}
+        for symbol in policy.symbols:
+            market = snapshot["symbols"].get(symbol)
+            if not isinstance(market, dict):
+                continue
+            bars = market.get("bars", {})
+            compact = {tf: [[bar.get(field) for field in fields] for bar in (bars.get(tf) or [])[-limit:]
+                            if isinstance(bar, dict)] for tf, limit in limits.items() if tf in policy.timeframes}
+            symbols[symbol] = {key: value for key, value in market.items() if key != "bars"} | {"bars": compact}
+        return snapshot | {"symbols": symbols, "bar_fields": list(fields)}
+
+    def clear_watches(self):
+        self.store.set("watch_candidates", {})
+
+    def monitor_watches(self):
+        watched = self.store.get("watch_candidates", {})
+        if not watched:
+            return
+        policy = self.policy()
+        if not policy or self.store.get("paused", True):
+            self.clear_watches()
+            return
+        snapshot = self.snapshot()
+        now = int(time.time())
+        for symbol, raw in list(watched.items()):
+            try:
+                candidate = WatchCandidate(**raw)
+                if candidate.symbol != symbol or candidate.policy_version != policy.version:
+                    state = "invalidated"
+                elif any(p["symbol"] == symbol for p in snapshot["positions"]):
+                    state = "invalidated"
+                else:
+                    state = candidate.check(snapshot, now)
+            except (KeyError, TypeError, ValueError):
+                state = "invalidated"
+            if state == "waiting":
+                continue
+            watched.pop(symbol, None)
+            self.store.set("watch_candidates", watched)  # Consume before any possible order.
+            if state == "triggered":
+                try:
+                    decision = DecisionProposal.parse(candidate.decision, policy, snapshot)
+                    self.queue(decision, "watch", time.time(), min(candidate.expires, now+self.cfg["command_ttl_seconds"]))
+                    self.store.event("watch_triggered", {"symbol": symbol, "reason": candidate.reason})
+                except (KeyError, TypeError, ValueError):
+                    self.store.event("watch_invalidated", {"symbol": symbol, "reason": "觸發後行情或停損條件不再有效"})
+                    self.store.set("last_analysis", 0)
+            else:
+                self.store.event("watch_invalidated", {"symbol": symbol, "reason": state})
+                self.store.set("last_analysis", 0)
 
     @staticmethod
     def market_issues(snapshot, policy):
@@ -377,6 +437,8 @@ class Agent:
                 raise ValueError("不可從策略移除仍有本系統持倉的商品，請先平倉")
             self.store.set("paused", True)
             self.store.set("policy", p.to_dict())
+            self.clear_watches()
+            self.store.set("last_analysis", 0)
         elif row["kind"] == "resume":
             snapshot = self.snapshot()
             if snapshot.get("ea_version") != REQUIRED_EA_VERSION:
@@ -391,9 +453,11 @@ class Agent:
                 raise ValueError("行情尚未就緒：" + "；".join(issues) + "。這次確認碼已使用；行情恢復後請再傳『啟動』取得新確認碼")
             self.store.set("paused", False)
             self.store.set("resume_nonce", self.store.get("resume_nonce", 0)+1)
+            self.store.set("last_analysis", 0)
         elif row["kind"] == "close":
             snapshot = self.snapshot()
             self.store.set("paused", True)
+            self.clear_watches()
             for pos in snapshot["positions"]:
                 if pos["owned"] and pos["id"] in data["ids"]:
                     self.queue(DecisionProposal("CLOSE", pos["symbol"], "使用者確認平倉", position_id=str(pos["id"])), "manual", time.time())
@@ -402,6 +466,7 @@ class Agent:
             if any(p["owned"] for p in snapshot["positions"]):
                 raise ValueError("有本系統持倉，不能重設總回撤")
             self.store.set("paused", True)
+            self.clear_watches()
             self.store.set("reset_nonce", self.store.get("reset_nonce", 0)+1)
         self.store.event("confirmed", {"id": identifier, "kind": row["kind"]})
         self.publish()
@@ -430,6 +495,7 @@ class Agent:
                 raise
         if message in {"暫停", "/pause"}:
             self.store.set("paused", True)
+            self.clear_watches()
             self.publish()
             return "已暫停新單，既有持倉保護繼續。"
         if message in {"啟動", "/resume"}:
@@ -462,6 +528,8 @@ class Agent:
             if p:
                 issues = self.market_issues(s, p)
                 parts.append("策略商品行情：" + ("已就緒。" if not issues else "；".join(issues) + "。"))
+                watched = self.store.get("watch_candidates", {})
+                parts.append("待觸發機會：" + ("、".join(watched) if watched else "無") + "。")
             parts.append("AI：" + self.api_status + "。")
             return "\n".join(parts)
         if message in {"原因", "/why"}:
@@ -491,6 +559,10 @@ class Agent:
                 elif event["kind"] == "entry_review":
                     recent.append("進場前 AI 複核" + ("通過" if data.get("allow") is True else "未通過") +
                                   "：" + str(data.get("reason", "未提供理由"))[:400])
+                elif event["kind"] == "watch_invalidated":
+                    recent.append("候選機會失效：" + str(data.get("symbol", "")) + "；" + str(data.get("reason", ""))[:200])
+                elif event["kind"] == "watch_triggered":
+                    recent.append("候選機會觸發：" + str(data.get("symbol", "")) + "；進場前仍需 AI 複核。")
                 if len(recent) >= 3:
                     break
             parts.extend(recent or ["目前沒有可顯示的策略或交易決策紀錄。"])
@@ -568,7 +640,7 @@ class Agent:
         if decision.action in {"BUY", "SELL"}:
             try:
                 review = self.provider.call("entry_review", {"policy": p.to_dict(),
-                    "decision": decision.to_dict(), "snapshot": snapshot})
+                    "decision": decision.to_dict(), "snapshot": self.ai_snapshot(snapshot, p)})
             except Exception as exc:
                 if isinstance(exc, ValueError) and str(exc) == "API local cooldown active":
                     return  # Keep queued until the shared API interval or command expiry.
@@ -649,6 +721,9 @@ class Agent:
             return  # Market Watch removal must not trigger an AI decision or new order.
         if snapshot.get("halted") or snapshot.get("state_ok") is not True:
             return
+        watched = self.store.get("watch_candidates", {})
+        if set(p.symbols) <= set(watched) and not any(x["owned"] for x in snapshot["positions"]):
+            return  # Local price/bar checks own every outstanding opportunity.
         now = time.time()
         signature = [[x["id"], x["volume"], x["sl"]] for x in snapshot["positions"] if x["owned"]]
         changed = signature != self.store.get("position_signature", [])
@@ -661,9 +736,10 @@ class Agent:
         self.store.event("analysis_input", {"snapshot": snapshot, "policy": p.to_dict(), "model": self.cfg["provider"]["model"],
                                             "execution_context": execution_context})
         try:
-            response = self.provider.call("decisions", {"policy": p.to_dict(), "snapshot": snapshot,
+            response = self.provider.call("decisions", {"policy": p.to_dict(), "snapshot": self.ai_snapshot(snapshot, p),
                                                         "execution_context": execution_context,
-                                                        "new_entries_paused": paused, "memory": self.store.memory()})
+                                                        "new_entries_paused": paused, "active_watches": watched,
+                                                        "memory": self.store.memory()})
         except ValueError as exc:
             if str(exc) == "API local cooldown active":
                 # Multi-account agents share one key. Retry when the shared call interval ends.
@@ -679,6 +755,23 @@ class Agent:
         decisions = [DecisionProposal.parse(x, p, fresh) for x in raw]
         if len({d.symbol for d in decisions}) != len(decisions):
             raise ValueError("multiple decisions for one symbol")
+        watch_raw = response.get("watches", [])
+        if not isinstance(watch_raw, list) or len(watch_raw) > len(p.symbols):
+            raise ValueError("invalid watches list")
+        proposed_watches = [WatchCandidate.parse(x, p, fresh, int(time.time())) for x in watch_raw]
+        new_symbols = [w.symbol for w in proposed_watches]
+        if len(new_symbols) != len(set(new_symbols)) or set(new_symbols) & set(watched):
+            raise ValueError("duplicate or already active watch")
+        if any(d.action in {"BUY", "SELL", "REVERSE"} and d.symbol in set(watched) | set(new_symbols)
+               for d in decisions):
+            raise ValueError("watch and immediate entry conflict")
+        if proposed_watches and not paused:
+            watched.update({w.symbol: w.to_dict() for w in proposed_watches})
+            self.store.set("watch_candidates", watched)
+            for w in proposed_watches:
+                self.store.event("watch_created", {"symbol": w.symbol, "basis": w.basis,
+                                                   "trigger": w.trigger_price, "invalidation": w.invalidation_price,
+                                                   "expires": w.expires, "policy_version": p.version})
         for d in decisions:
             if paused and d.action in {"BUY", "SELL", "REVERSE"}:
                 self.store.event("decision_blocked", {"reason": "new entries paused", "decision": d.to_dict()})
@@ -746,6 +839,7 @@ class Agent:
         self.panel_events()
         self.publish()
         self.reverse_followups()
+        self.monitor_watches()
         self.dispatch()
         self.analyze()
 

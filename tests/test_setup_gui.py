@@ -7,6 +7,8 @@ import pytest
 from aitrader.provider import build_provider
 from aitrader.secrets import load_into_environment, read_secrets
 from aitrader.setup_gui import save_form, valid_ea
+from aitrader.setup_gui import visible_analysis_minutes
+from aitrader.service import load_config
 import aitrader.setup_gui as setup_gui
 from aitrader.accounts import profile_id, save_registry
 
@@ -49,6 +51,36 @@ def test_renewed_package_does_not_need_telegram_to_save_demo_config(tmp_path):
     result = save_form(path, "12345", "TEST-Demo", "new-model", "", False, False, "", "")
     assert result["account"] == "12345" and result["provider"]["model"] == "new-model"
     assert result["telegram"]["enabled"] is False
+
+
+def test_analysis_interval_saved_per_account_and_invalid_value_rejected(tmp_path):
+    config = {"account": "12345", "server": "TEST-Demo", "magic": 26092751,
+              "bridge_dir": str(tmp_path / "MetaQuotes/Terminal/Common/Files/AITrader/demo-1"),
+              "provider": {"kind": "gemini", "model": "old", "enabled": False},
+              "telegram": {"enabled": False, "user_id": 0, "chat_id": 0}}
+    path = tmp_path / "local.json"
+    path.write_text(json.dumps(config), encoding="utf8")
+    result = save_form(path, "12345", "TEST-Demo", "new-model", "", False, False, "", "",
+                       analysis_minutes="15")
+    assert result["analysis_interval_seconds"] == 900
+    with pytest.raises(ValueError, match="1 至 1440"):
+        save_form(path, "12345", "TEST-Demo", "new-model", "", False, False, "", "",
+                  analysis_minutes="0")
+
+
+def test_old_five_minute_default_migrates_without_overriding_new_explicit_choice(tmp_path):
+    cfg = json.loads((setup_gui.ROOT / "config" / "example.json").read_text(encoding="utf-8"))
+    cfg.update(account="12345", server="TEST-Demo", analysis_interval_seconds=300)
+    cfg["provider"]["model"] = "test-model"
+    cfg.pop("watch_schedule_version")
+    path = tmp_path / "local.json"
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    assert visible_analysis_minutes(cfg) == 15
+    assert load_config(path)["analysis_interval_seconds"] == 900
+    cfg["watch_schedule_version"] = 1
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    assert visible_analysis_minutes(cfg) == 5
+    assert load_config(path)["analysis_interval_seconds"] == 300
 
 
 @pytest.mark.parametrize("symbols,commissions", [("XAUUSD,EURUSD,GBPUSD", "7,0"), ("XAUUSD,XAUUSD", "7,7"), ("XAUUSD", "-2"), ("XAUUSD;EURUSD", "7")])
@@ -128,7 +160,7 @@ def test_account_dropdown_shows_broker_and_selects_original_profile(tmp_path, mo
     window.account_choice = SimpleNamespace(get=lambda: labels[b])
     selected = {}
     window.vars = {name: SimpleNamespace(set=lambda value, key=name: selected.__setitem__(key, value))
-                   for name in ("account", "server", "symbols", "commissions", "model", "provider", "account_mode", "user_id")}
+                   for name in ("account", "server", "symbols", "commissions", "model", "provider", "account_mode", "analysis_minutes", "user_id")}
     window.status = SimpleNamespace(set=lambda value: selected.__setitem__("status", value))
     window.model_drafts = {}
     window.provider_test_button = SimpleNamespace(configure=lambda **kwargs: None)
