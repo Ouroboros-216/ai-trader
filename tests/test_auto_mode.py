@@ -114,7 +114,66 @@ def test_account_router_keeps_confirm_button_after_draft_discussion(agent, snaps
     reply = router.handle("這張草案何時進場？")
     assert pending in reply and router.store.get("pending") == pending
     rows = router.reply_markup("這張草案何時進場？", reply, pending)["inline_keyboard"]
-    assert rows[0][0]["text"] == "確認此提案"
+    assert [button["text"] for button in rows[0]] == ["接受草案", "不接受草案"]
+
+
+def test_accept_or_reject_pending_draft_buttons_never_start_trading(agent, policy, tmp_path):
+    router = AccountRouter({"demo-a": agent}, Store(tmp_path / "router.sqlite"))
+    router.handle("12345")
+    agent.provider.response = {"policy": policy | {"title": "候選短線策略"}, "questions": []}
+    draft = router.handle("策略 XAUUSD 短線")
+    old = agent.store.get("pending")
+    buttons = router.reply_markup("策略 XAUUSD 短線", draft, old)["inline_keyboard"][0]
+    assert [item["text"] for item in buttons] == ["接受草案", "不接受草案"]
+    rejected = router.handle(router.callback_message(buttons[1]["callback_data"]))
+    assert "已取消" in rejected and agent.store.get("policy") == policy
+    assert agent.store.get("pending") == "" and agent.store.get("paused", True) is True
+    with pytest.raises(ValueError, match="過期|已使用|不屬於"):
+        router.handle(router.callback_message(buttons[1]["callback_data"]))
+    with pytest.raises(ValueError, match="過期|已使用"):
+        router.handle(router.callback_message(buttons[0]["callback_data"]))
+    agent.provider.response = {"policy": policy | {"title": "正式短線草案"}, "questions": []}
+    draft = router.handle("策略 XAUUSD 短線")
+    pending = agent.store.get("pending")
+    accept = router.reply_markup("策略 XAUUSD 短線", draft, pending)["inline_keyboard"][0][0]
+    assert "已套用" in router.handle(router.callback_message(accept["callback_data"]))
+    assert agent.policy().title == "正式短線草案" and agent.store.get("paused", True) is True
+    assert agent.store.get("pending") == ""
+
+
+def test_expired_draft_cannot_be_accepted_or_rejected(agent, policy):
+    agent.provider.response = {"policy": policy, "questions": []}
+    agent.handle("策略 XAUUSD 結構法")
+    identifier = agent.store.get("pending")
+    with agent.store.db:
+        agent.store.db.execute("UPDATE proposals SET expires=0 WHERE id=?", (identifier,))
+    with pytest.raises(ValueError, match="過期"):
+        agent.handle("拒絕草案 " + identifier)
+    with pytest.raises(ValueError, match="過期"):
+        agent.handle("確認 " + identifier)
+    assert agent.store.get("policy") == policy
+
+
+def test_plain_draft_feedback_creates_revision_but_questions_stay_chat(agent, policy):
+    agent.provider.response = {"policy": policy, "questions": []}
+    agent.handle("策略 XAUUSD 結構法")
+    old = agent.store.get("pending")
+    agent.provider.response = {"answer": "BOS 只看已完成 K 棒。"}
+    answer = agent.handle("這張草案的 BOS 是什麼？")
+    assert "已完成" in answer and agent.provider.calls[-1][0] == "chat"
+    assert agent.store.get("pending") == old
+    agent.provider.response = {"answer": "這是成本估算。"}
+    assert "成本估算" in agent.handle("請問這樣的成本")
+    assert agent.provider.calls[-1][0] == "chat" and agent.store.get("pending") == old
+    count = len(agent.provider.calls)
+    assert "草案尚未套用" in agent.handle("好")
+    assert len(agent.provider.calls) == count
+    agent.provider.response = {"policy": policy | {"title": "只做空短線"}, "questions": []}
+    preview = agent.handle("我想要把進場改成 M5 收棒確認")
+    assert "只做空短線" in preview and agent.provider.calls[-1][0] == "strategy"
+    assert agent.provider.calls[-1][1]["pending_policy"]["title"] == policy["title"]
+    assert agent.store.get("pending") != old
+    assert agent.store.db.execute("SELECT status FROM proposals WHERE id=?", (old,)).fetchone()[0] == "superseded"
 
 
 def test_auto_mode_requires_usable_completed_bars(agent, policy):

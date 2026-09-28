@@ -40,6 +40,8 @@ class Telegram:
                 command = message["text"][:8000]
                 if callback and hasattr(self.agent, "callback_message"):
                     command = self.agent.callback_message(callback.get("data", ""))
+                elif callback and str(callback.get("data", "")).startswith("r:"):
+                    command = "拒絕草案 " + callback["data"][2:]
                 reply = self.agent.handle(command)
             except Exception as exc:
                 reply = "未套用操作：" + (str(exc) if isinstance(exc, ValueError) else type(exc).__name__)
@@ -51,7 +53,11 @@ class Telegram:
                     payload["reply_markup"] = self.agent.reply_markup(command, reply, pending)
                 elif pending and pending in reply and i+3500>=len(reply):
                     data = self.agent.callback_data(pending) if hasattr(self.agent, "callback_data") else pending
-                    payload["reply_markup"] = {"inline_keyboard": [[{"text": "確認此提案", "callback_data": data}]]}
+                    is_policy = (hasattr(self.agent, "pending_policy") and self.agent.pending_policy()[0] == pending)
+                    payload["reply_markup"] = {"inline_keyboard": [[
+                        {"text": "接受草案", "callback_data": data},
+                        {"text": "不接受草案", "callback_data": "r:" + pending}
+                    ]] if is_policy else [[{"text": "確認此提案", "callback_data": data}]]}
                 self.call("sendMessage", payload)
             if callback:
                 self.call("answerCallbackQuery", {"callback_query_id": callback["id"], "text": "已處理，請查看回覆"})

@@ -90,6 +90,12 @@ class AccountRouter:
             if not options or options["nonce"] != parts[2] or parts[3] not in options["items"]:
                 raise ValueError("方案選項已過期；請重新討論並選擇")
             return "選方案 " + parts[3]
+        if data.startswith("r:"):
+            parts = data.split(":")
+            if len(parts) != 3 or len(parts[2]) != 32:
+                raise ValueError("草案按鈕無效")
+            identifier = self.account_from_token(parts[1])
+            return "拒絕草案 " + parts[1] + "|" + parts[2]
         if data.startswith("b:"):
             identifier = self.account_from_token(data[2:])
             if self.selected() != identifier:
@@ -154,8 +160,12 @@ class AccountRouter:
                           "callback_data": "c:" + token + ":" + options["nonce"] + ":" + letter}]
                         for letter, item in options["items"].items()] + rows
         if pending and pending in reply:
-            label = "確認套用全部策略" if self.store.get("pending_account") == "__all__" else "確認此提案"
-            rows.insert(0, [{"text": label, "callback_data": self.callback_data(pending)}])
+            if pending_policy and agent.pending_policy()[0] == pending:
+                rows.insert(0, [{"text": "接受草案", "callback_data": self.callback_data(pending)},
+                                {"text": "不接受草案", "callback_data": "r:" + token + ":" + pending}])
+            else:
+                label = "確認套用全部策略" if self.store.get("pending_account") == "__all__" else "確認此提案"
+                rows.insert(0, [{"text": label, "callback_data": self.callback_data(pending)}])
         rows.append([{"text": "返回帳號清單", "callback_data": "b:" + token}])
         return {"inline_keyboard": rows}
 
@@ -359,6 +369,12 @@ class AccountRouter:
                 raise ValueError("提案帳號或 ID 無效")
             identifier = self.account_from_token(routed)
             message = "確認 " + proposal
+        if message.startswith("拒絕草案 ") and "|" in message:
+            routed, proposal = message[5:].strip().split("|", 1)
+            if len(proposal) != 32:
+                raise ValueError("草案帳號或 ID 無效")
+            identifier = self.account_from_token(routed)
+            message = "拒絕草案 " + proposal
         if not identifier:
             return "請先傳『帳號』查看清單，再點帳號按鈕或回覆帳號數字。"
         if message in {"策略", "/strategy"}:

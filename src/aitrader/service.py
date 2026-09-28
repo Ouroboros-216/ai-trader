@@ -207,6 +207,29 @@ class Agent:
             (identifier, time.time())).fetchone()
         return (identifier, json.loads(row["data"])) if row else ("", None)
 
+    def reject_policy(self, identifier):
+        pending, _ = self.pending_policy()
+        if not pending or pending != identifier:
+            raise ValueError("草案已過期、已使用或不屬於目前帳號")
+        with self.store.db:
+            changed = self.store.db.execute(
+                "UPDATE proposals SET status='rejected' WHERE id=? AND kind='policy' AND status='pending' AND base_version=? AND expires>?",
+                (identifier, self.version(), time.time())).rowcount
+            if changed != 1:
+                raise ValueError("草案已過期或策略版本已變更")
+            self.store.db.execute("UPDATE state SET value=? WHERE key='pending' AND value=?",
+                                  (dumps(""), dumps(identifier)))
+        self.store.event("proposal_rejected", {"id": identifier, "reason": "使用者不接受草案"})
+        self.publish()
+        return "已取消這份策略草案；原本已確認策略與交易狀態沒有改變。可直接說新想法。"
+
+    @staticmethod
+    def clear_draft_revision(message):
+        if any(mark in message for mark in ("？", "?")) or re.search(r"(?:可不可以|能不能|會不會|怎麼|為什麼|如何|什麼)", message):
+            return False
+        return bool(re.search(r"(?:改成|改為|改用|換成|調整|修改|增加|加入|移除|刪掉|刪除|不要|只做)", message) or
+                    re.match(r"^(?:我想要|我希望|我要)\s*(?:每筆|單筆|總風險|固定|只|交易|進場|出場|停損|商品|週期)", message))
+
     def conversation_history(self, count=6):
         rows = self.store.db.execute(
             "SELECT data FROM events WHERE kind='conversation' ORDER BY id DESC LIMIT ?", (count,)).fetchall()
@@ -244,8 +267,8 @@ class Agent:
                              ("術語如何定義", policy.definitions)):
             lines.extend(("", label + "：", paragraph(value)))
         lines.extend(("", "本次變更：" + ("、".join(changed) if before else "首次建立"),
-                      "有疑問可直接回覆；要改內容，傳『修改 你的要求』，系統會產生新版草案。",
-                      "確認只保存策略，之後仍須另行確認『啟動』。草案 10 分鐘後過期。",
+                      "有疑問可直接回覆；明確說出要改的條件，系統會產生新版草案。",
+                      "按『接受草案』只保存策略，之後仍須另行確認『啟動』；不接受可按『不接受草案』。草案 10 分鐘後過期。",
                       "確認 " + identifier))
         return "\n".join(lines)
 
@@ -543,6 +566,11 @@ class Agent:
             except ValueError as exc:
                 self.store.event("proposal_rejected", {"id": identifier[:64], "reason": str(exc)})
                 raise
+        if message in {"接受草案", "不接受草案"} or message.startswith("拒絕草案 "):
+            identifier = message.split(" ", 1)[1].strip() if message.startswith("拒絕草案 ") else self.pending_policy()[0]
+            if not identifier:
+                raise ValueError("目前沒有有效的待確認策略草案")
+            return self.confirm(identifier) if message == "接受草案" else self.reject_policy(identifier)
         if message in {"暫停", "/pause"}:
             self.store.set("paused", True)
             self.clear_watches()
@@ -618,6 +646,10 @@ class Agent:
             parts.extend(recent or ["目前沒有可顯示的策略或交易決策紀錄。"])
             return "\n".join(parts)
         pending_id, pending_policy = self.pending_policy()
+        if pending_policy and message in {"好", "可以", "同意"}:
+            return "草案尚未套用。請按『接受草案』或『不接受草案』；想改內容可以直接說明。\n確認 " + pending_id
+        if pending_policy and self.clear_draft_revision(message):
+            return self.revise_draft(message)
         answer = self.provider.call("chat", {"question": message, "snapshot": self.snapshot(),
                                              "policy": self.store.get("policy"), "pending_policy": pending_policy,
                                              "conversation_history": self.conversation_history()})

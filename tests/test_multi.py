@@ -202,6 +202,25 @@ def test_proposal_confirmation_button_stays_account_bound(tmp_path):
     assert not b.messages
 
 
+def test_reject_button_routes_to_original_account_after_selection_changes(tmp_path):
+    a, b = FakeAgent("101", tmp_path / "a.sqlite"), FakeAgent("202", tmp_path / "b.sqlite")
+    router = AccountRouter({"demo-a": a, "demo-b": b}, Store(tmp_path / "router.sqlite"))
+    router.handle("101")
+    proposal = "b" * 32
+    callback = "r:" + router.account_token("demo-a") + ":" + proposal
+    router.handle("202")
+    assert router.handle(router.callback_message(callback)) == "【Demo｜101】\nok"
+    assert a.messages == ["拒絕草案 " + proposal] and not b.messages
+
+
+def test_reject_callback_rejects_malformed_account_or_proposal(tmp_path):
+    router = AccountRouter({"demo-a": FakeAgent("101", tmp_path / "a.sqlite")}, Store(tmp_path / "router.sqlite"))
+    with pytest.raises(ValueError, match="草案按鈕"):
+        router.callback_message("r:short:abc")
+    with pytest.raises(ValueError, match="帳號按鈕"):
+        router.callback_message("r:badbadbadbad:" + "a" * 32)
+
+
 def test_old_menu_button_cannot_act_after_switch(tmp_path):
     a, b = FakeAgent("101", tmp_path / "a.sqlite"), FakeAgent("202", tmp_path / "b.sqlite")
     router = AccountRouter({"demo-a": a, "demo-b": b}, Store(tmp_path / "router.sqlite"))
