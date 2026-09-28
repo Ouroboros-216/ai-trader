@@ -76,6 +76,63 @@ def test_ai_creates_watch_and_does_not_recheck_while_all_symbols_are_watched(age
     assert [kind for kind, _ in agent.provider.calls] == ["decisions"]
 
 
+def test_candidate_chart_wire_tracks_watch_lifecycle(agent, snapshot, policy, decision):
+    agent.store.set("paused", False)
+    agent.store.set("policy", policy | {"symbols": ["XAUUSD"]})
+    agent.provider.response = {"decisions": [], "watches": [candidate(decision)]}
+    agent.tick()
+    wire = (agent.bridge.root / "preview.csv").read_text(encoding="utf8").strip().split(",")
+    assert wire[:5] == ["1", agent.cfg["account"], agent.cfg["server"], str(agent.cfg["magic"]), "1"]
+    assert wire[6].split("|")[:6] == ["XAUUSD", "SELL", "QUOTE", "M15", "2999.00000000", "3005.00000000"]
+
+    agent.store.set("paused", True)
+    agent.publish_previews()
+    assert (agent.bridge.root / "preview.csv").read_text(encoding="utf8").strip().endswith(",-")
+
+    agent.store.set("paused", False)
+    snapshot["symbols"]["XAUUSD"] |= {"bid": 3005.8, "ask": 3006.0}
+    atomic_write(agent.bridge.root / "snapshot.json", json.dumps(snapshot))
+    agent.monitor_watches()
+    agent.publish_previews()
+    assert agent.store.get("watch_candidates") == {}
+    assert (agent.bridge.root / "preview.csv").read_text(encoding="utf8").strip().endswith(",-")
+
+
+def test_candidate_chart_wire_clears_on_policy_change(agent, snapshot, policy, decision):
+    agent.store.set("paused", False)
+    watch = WatchCandidate.parse(candidate(decision), StrategyPolicy.parse(policy, 1), snapshot, int(time.time()))
+    agent.store.set("watch_candidates", {watch.symbol: watch.to_dict()})
+    agent.store.set("policy", policy | {"version": 2})
+    agent.publish_previews()
+    assert (agent.bridge.root / "preview.csv").read_text(encoding="utf8").strip().endswith(",-")
+
+
+def test_candidate_chart_wire_hides_when_market_not_ready(agent, snapshot, policy, decision):
+    agent.store.set("paused", False)
+    watch = WatchCandidate.parse(candidate(decision), StrategyPolicy.parse(policy, 1), snapshot, int(time.time()))
+    agent.store.set("watch_candidates", {watch.symbol: watch.to_dict()})
+    snapshot["symbols"]["XAUUSD"]["ready"] = False
+    atomic_write(agent.bridge.root / "snapshot.json", json.dumps(snapshot))
+    agent.publish_previews()
+    assert (agent.bridge.root / "preview.csv").read_text(encoding="utf8").strip().endswith(",-")
+
+
+def test_candidate_chart_wire_clears_before_ai_veto(agent, snapshot, policy, decision):
+    agent.store.set("paused", False)
+    watch = WatchCandidate.parse(candidate(decision), StrategyPolicy.parse(policy, 1), snapshot, int(time.time()))
+    agent.store.set("watch_candidates", {watch.symbol: watch.to_dict()})
+    agent.publish_previews()
+    assert "XAUUSD|SELL" in (agent.bridge.root / "preview.csv").read_text(encoding="utf8")
+    snapshot["symbols"]["XAUUSD"] |= {"bid": 2998.0, "ask": 2998.2}
+    atomic_write(agent.bridge.root / "snapshot.json", json.dumps(snapshot))
+    agent.monitor_watches()
+    agent.provider.response = {"allow": False, "reason": "進場條件已失效"}
+    agent.dispatch()
+    agent.publish_previews()
+    assert (agent.bridge.root / "preview.csv").read_text(encoding="utf8").strip().endswith(",-")
+    assert agent.store.db.execute("SELECT status FROM commands").fetchone()[0] == "REJECTED"
+
+
 def test_ai_snapshot_only_sends_policy_symbols_and_bounded_bars(agent, snapshot, policy):
     from aitrader.service import Agent
     rows = [{"time": n, "open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 3} for n in range(100)]

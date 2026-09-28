@@ -1,5 +1,5 @@
 #property strict
-#property version "1.012"
+#property version "1.013"
 #property description "Independent AI operator with exact account-mode binding. Python bridge required."
 
 // Self-contained execution wrapper: no terminal-local include dependency.
@@ -79,6 +79,7 @@ string sizing_mode="percent";
 double sizing_value=0;
 ulong last_snapshot=0,last_panel=0,last_history=0,last_catalog=0;
 string prefix="AIT_";
+string preview_prefix="AIT_CANDIDATE_";
 
 long Now() { return (long)TimeGMT(); }
 string Account() { return (string)AccountInfoInteger(ACCOUNT_LOGIN); }
@@ -485,7 +486,7 @@ string Bars(string symbol,ENUM_TIMEFRAMES tf,bool &ready)
 }
 void Snapshot()
 {
-   string out="{\"schema\":1,\"ea_version\":\"1.012\",\"account\":"+J(Account())+",\"server\":"+J(Server())+",\"magic\":"+(string)InpMagic+",\"demo\":"+Bool(IsDemo())+",\"account_mode\":"+J(bound_mode)+",\"live_enabled\":"+Bool(live_allowed)+",\"time\":"+(string)Now()+",\"equity\":"+Num(AccountInfoDouble(ACCOUNT_EQUITY))+",\"balance\":"+Num(AccountInfoDouble(ACCOUNT_BALANCE))+",\"currency\":"+J(AccountInfoString(ACCOUNT_CURRENCY))+",\"state_ok\":"+Bool(state_ok)+",\"halted\":"+Bool(daily_halt||total_halt||!state_ok)+",\"daily_halt\":"+Bool(daily_halt)+",\"total_halt\":"+Bool(total_halt)+",\"local_pause\":"+Bool(local_pause)+",\"missing_symbols\":["+missing+"],\"positions\":[";
+   string out="{\"schema\":1,\"ea_version\":\"1.013\",\"account\":"+J(Account())+",\"server\":"+J(Server())+",\"magic\":"+(string)InpMagic+",\"demo\":"+Bool(IsDemo())+",\"account_mode\":"+J(bound_mode)+",\"live_enabled\":"+Bool(live_allowed)+",\"time\":"+(string)Now()+",\"equity\":"+Num(AccountInfoDouble(ACCOUNT_EQUITY))+",\"balance\":"+Num(AccountInfoDouble(ACCOUNT_BALANCE))+",\"currency\":"+J(AccountInfoString(ACCOUNT_CURRENCY))+",\"state_ok\":"+Bool(state_ok)+",\"halted\":"+Bool(daily_halt||total_halt||!state_ok)+",\"daily_halt\":"+Bool(daily_halt)+",\"total_halt\":"+Bool(total_halt)+",\"local_pause\":"+Bool(local_pause)+",\"missing_symbols\":["+missing+"],\"positions\":[";
    int count=0;
    for(int i=0;i<PositionsTotal();i++)
    {
@@ -549,6 +550,73 @@ void ExportDeals()
       long age_seconds=(long)TimeCurrent()-(long)HistoryDealGetInteger(deal,DEAL_TIME);
       string row="{\"account\":"+J(Account())+",\"server\":"+J(Server())+",\"deal\":"+J((string)deal)+",\"position_id\":"+J((string)HistoryDealGetInteger(deal,DEAL_POSITION_ID))+",\"time_server\":"+(string)HistoryDealGetInteger(deal,DEAL_TIME)+",\"observed_utc\":"+(string)Now()+",\"entry\":"+(string)entry_kind+",\"opening\":"+Bool(opening)+",\"ai_order\":"+Bool(ai_order)+",\"side\":"+J(side)+",\"price\":"+Num(HistoryDealGetDouble(deal,DEAL_PRICE))+",\"age_seconds\":"+(string)age_seconds+",\"symbol\":"+J(HistoryDealGetString(deal,DEAL_SYMBOL))+",\"volume\":"+Num(HistoryDealGetDouble(deal,DEAL_VOLUME))+",\"profit\":"+Num(HistoryDealGetDouble(deal,DEAL_PROFIT))+",\"commission\":"+Num(HistoryDealGetDouble(deal,DEAL_COMMISSION))+",\"swap\":"+Num(HistoryDealGetDouble(deal,DEAL_SWAP))+",\"fee\":"+Num(HistoryDealGetDouble(deal,DEAL_FEE))+"}";
       if(Append("deals.jsonl",row)) WriteAtomic(marker,"1");
+   }
+}
+void ClearPreviews()
+{
+   for(long chart=ChartFirst(), i=0;chart>=0&&i<100;chart=ChartNext(chart),i++)
+      ObjectsDeleteAll(chart,preview_prefix);
+}
+void PreviewLine(long chart,string name,double price,color shade,string description)
+{
+   string id=preview_prefix+name;
+   if(ObjectFind(chart,id)<0) ObjectCreate(chart,id,OBJ_HLINE,0,0,price);
+   ObjectSetDouble(chart,id,OBJPROP_PRICE,price);
+   ObjectSetInteger(chart,id,OBJPROP_COLOR,shade);
+   ObjectSetInteger(chart,id,OBJPROP_STYLE,STYLE_DASH);
+   ObjectSetInteger(chart,id,OBJPROP_WIDTH,2);
+   ObjectSetInteger(chart,id,OBJPROP_SELECTABLE,false);
+   ObjectSetString(chart,id,OBJPROP_TOOLTIP,description);
+}
+void DrawPreview(long chart,string symbol,string side,string basis,string timeframe,double trigger,double invalidation)
+{
+   int digits=(int)SymbolInfoInteger(symbol,SYMBOL_DIGITS);
+   string trigger_text=DoubleToString(trigger,digits),invalid_text=DoubleToString(invalidation,digits);
+   string label="候選"+(side=="BUY"?"買入":"賣出")+" "+symbol+" "+basis+" "+timeframe+
+                "｜觸發 "+trigger_text+"｜失效 "+invalid_text+"｜AI 尚未核准";
+   PreviewLine(chart,"TRIGGER",trigger,side=="BUY"?clrLimeGreen:clrTomato,label);
+   PreviewLine(chart,"INVALID",invalidation,clrOrange,"候選失效價 "+invalid_text);
+   string id=preview_prefix+"LABEL";
+   if(ObjectFind(chart,id)<0) ObjectCreate(chart,id,OBJ_LABEL,0,0,0);
+   ObjectSetInteger(chart,id,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
+   ObjectSetInteger(chart,id,OBJPROP_ANCHOR,ANCHOR_RIGHT_UPPER);
+   ObjectSetInteger(chart,id,OBJPROP_XDISTANCE,15);
+   ObjectSetInteger(chart,id,OBJPROP_YDISTANCE,45);
+   ObjectSetInteger(chart,id,OBJPROP_COLOR,side=="BUY"?clrLimeGreen:clrTomato);
+   ObjectSetInteger(chart,id,OBJPROP_FONTSIZE,10);
+   ObjectSetInteger(chart,id,OBJPROP_SELECTABLE,false);
+   ObjectSetString(chart,id,OBJPROP_FONT,"Microsoft JhengHei");
+   ObjectSetString(chart,id,OBJPROP_TEXT,label);
+   ChartRedraw(chart);
+}
+void ReadPreviews()
+{
+   string a[];
+   if(StringSplit(Read("preview.csv"),',',a)!=7||a[0]!="1"||a[1]!=Account()||a[2]!=Server()||
+      !DigitsOnly(a[3])||!DigitsOnly(a[4])||!DigitsOnly(a[5])||
+      (ulong)StringToInteger(a[3])!=InpMagic||(int)StringToInteger(a[4])!=policy_version||
+      policy_version<=0||!enabled||local_pause||!state_ok||daily_halt||total_halt||
+      (long)StringToInteger(a[5])<Now()-15||(long)StringToInteger(a[5])>Now()+3)
+   { ClearPreviews(); return; }
+   string rows[]; int count=StringSplit(a[6],';',rows);
+   for(long chart=ChartFirst(), i=0;chart>=0&&i<100;chart=ChartNext(chart),i++)
+   {
+      bool found=false;
+      string chart_symbol=ChartSymbol(chart);
+      for(int j=0;j<count;j++)
+      {
+         string parts[];
+         if(StringSplit(rows[j],'|',parts)!=7||parts[0]!=chart_symbol||!SafeToken(parts[0])||
+            (parts[1]!="BUY"&&parts[1]!="SELL")||
+            (parts[2]!="QUOTE"&&parts[2]!="CLOSE")||
+            !DecimalNumber(parts[4])||!DecimalNumber(parts[5])||!DigitsOnly(parts[6])) continue;
+         double trigger=StringToDouble(parts[4]),invalidation=StringToDouble(parts[5]);
+         long expiry=StringToInteger(parts[6]);
+         if(trigger<=0||invalidation<=0||expiry<=Now()||expiry>Now()+86400) continue;
+         DrawPreview(chart,parts[0],parts[1],parts[2],parts[3],trigger,invalidation);
+         found=true; break;
+      }
+      if(!found) ObjectsDeleteAll(chart,preview_prefix);
    }
 }
 void Button(string name,string label,int x,int y,int width=100)
@@ -752,13 +820,13 @@ int OnInit()
    ArrayCopy(configured_commissions,commissions);
    ArrayCopy(configured_spreads,spreads); ArrayCopy(configured_slips,slips);
    trade.SetExpertMagicNumber(InpMagic); trade.SetAsyncMode(false); trade.SetDeviationInPoints(10);
-   LoadState(); LoadUsed(); RefreshWatchlist(); ReadPolicy(); Protect(); Snapshot(); Catalog(); Panel(); ExportDeals();
+   LoadState(); LoadUsed(); RefreshWatchlist(); ReadPolicy(); ReadPreviews(); Protect(); Snapshot(); Catalog(); Panel(); ExportDeals();
    EventSetTimer(1); return INIT_SUCCEEDED;
 }
 void OnTimer()
 {
    if(!AccountMatched()) { enabled=false; return; }
-   RefreshWatchlist(); ReadPolicy(); Protect(); Command();
+   RefreshWatchlist(); ReadPolicy(); ReadPreviews(); Protect(); Command();
    ulong now=GetTickCount64();
    if(now-last_snapshot>=5000) { Snapshot(); last_snapshot=now; }
    if(now-last_catalog>=60000) { Catalog(); last_catalog=now; }
@@ -774,5 +842,6 @@ void OnDeinit(const int reason)
 {
    EventKillTimer(); if(state_ok) SaveState();
    if(lock_handle!=INVALID_HANDLE) FileClose(lock_handle);
+   ClearPreviews();
    ObjectsDeleteAll(0,prefix); Comment("");
 }

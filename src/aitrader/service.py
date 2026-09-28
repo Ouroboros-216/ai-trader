@@ -15,7 +15,7 @@ from .storage import Store, dumps
 from .symbols import ambiguous_choice, catalog, relevant
 from .watch import WatchCandidate
 
-REQUIRED_EA_VERSION = "1.012"
+REQUIRED_EA_VERSION = "1.013"
 
 
 def load_config(path):
@@ -361,7 +361,7 @@ class Agent:
               risk_change=None, discussion_context=False, required_timeframes=()):
         snapshot = self.snapshot()
         if snapshot.get("ea_version") != REQUIRED_EA_VERSION:
-            raise ValueError("請先在 MT5 重新掛載 v1.012 EA，再建立策略")
+            raise ValueError("請先在 MT5 重新掛載 v1.013 EA，再建立策略")
         current = self.policy()
         # A strategy draft needs historical bars, not a live quote or known commission.
         # The latter are mandatory only when the account is resumed and an entry is sent.
@@ -480,7 +480,7 @@ class Agent:
         elif row["kind"] == "resume":
             snapshot = self.snapshot()
             if snapshot.get("ea_version") != REQUIRED_EA_VERSION:
-                raise ValueError("請先在 MT5 重新掛載 v1.012 EA，再啟動新單")
+                raise ValueError("請先在 MT5 重新掛載 v1.013 EA，再啟動新單")
             p = self.policy()
             if self.cfg.get("account_mode", "demo") == "real" and not self.cfg.get("live_enabled", False):
                 raise ValueError("此實盤帳號尚未授權自動新單")
@@ -892,6 +892,35 @@ class Agent:
                            "strategy": p.title if p else "尚無已確認策略", "api": self.api_status,
                            "chat": chat, "latest": events[0][:300] if events else "", "pending": pending_text})
 
+    def publish_previews(self):
+        """Publish only validated active watch levels; these are never broker orders."""
+        policy = self.policy()
+        now = int(time.time())
+        records = []
+        try:
+            snapshot = self.snapshot()
+        except (FileNotFoundError, OSError, ValueError):
+            snapshot = None
+        if policy and not self.store.get("paused", True):
+            for symbol, raw in self.store.get("watch_candidates", {}).items():
+                try:
+                    watch = WatchCandidate(**raw)
+                    side = watch.decision["action"]
+                    if (not snapshot or snapshot.get("ea_version") != REQUIRED_EA_VERSION or
+                        snapshot.get("halted") or snapshot.get("state_ok") is not True or
+                        snapshot.get("symbols", {}).get(symbol, {}).get("ready") is not True or
+                        watch.symbol != symbol or symbol not in policy.symbols or
+                        watch.policy_version != policy.version or watch.expires <= now or
+                        side not in {"BUY", "SELL"}):
+                        continue
+                    records.append("|".join((watch.symbol, side, watch.basis, watch.timeframe,
+                                              format(watch.trigger_price, ".8f"),
+                                              format(watch.invalidation_price, ".8f"), str(watch.expires))))
+                except (KeyError, TypeError, ValueError):
+                    continue
+        self.bridge.csv("preview.csv", [1, self.cfg["account"], self.cfg["server"], self.cfg["magic"],
+                                        policy.version if policy else 0, now, ";".join(records) or "-"])
+
     def panel_events(self):
         events, offset = self.bridge.tail("ui.jsonl", self.store.get("ui_offset", 0))
         for event in events:
@@ -922,10 +951,13 @@ class Agent:
         self.ingest()
         self.panel_events()
         self.publish()
-        self.reverse_followups()
-        self.monitor_watches()
-        self.dispatch()
-        self.analyze()
+        try:
+            self.reverse_followups()
+            self.monitor_watches()
+            self.dispatch()
+            self.analyze()
+        finally:
+            self.publish_previews()
 
     def close(self):
         self.store.db.close()
