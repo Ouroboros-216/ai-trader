@@ -70,7 +70,9 @@ string bound_account="",bound_server="",bound_mode="demo";
 bool live_allowed=false;
 int lock_handle=INVALID_HANDLE, n=0, policy_version=0, configured_n=0, reset_nonce=0,resume_nonce=0;
 bool symbols_ready=false;
-int panel_page=0,panel_pages=1;
+int chat_scroll=0,proposal_scroll=0,chat_total=0,proposal_total=0;
+bool proposal_view=false,chat_follow=true;
+string last_chat="";
 long policy_expiry=0, daykey=0;
 double highwater=0,daybase=0,risk_pct=0.5,total_pct=1.5,daily_pct=2,dd_pct=5;
 bool state_ok=false,daily_halt=false,total_halt=false,local_pause=true,enabled=false;
@@ -637,61 +639,143 @@ void ChatInput()
       ObjectSetString(0,id,OBJPROP_TEXT,"");
    }
    ObjectSetInteger(0,id,OBJPROP_XDISTANCE,10); ObjectSetInteger(0,id,OBJPROP_YDISTANCE,480);
-   ObjectSetInteger(0,id,OBJPROP_XSIZE,780); ObjectSetInteger(0,id,OBJPROP_YSIZE,32);
+   ObjectSetInteger(0,id,OBJPROP_XSIZE,600); ObjectSetInteger(0,id,OBJPROP_YSIZE,32);
    ObjectSetInteger(0,id,OBJPROP_ZORDER,10);
    ObjectSetInteger(0,id,OBJPROP_COLOR,clrBlack); ObjectSetInteger(0,id,OBJPROP_BGCOLOR,clrWhite);
    ObjectSetInteger(0,id,OBJPROP_FONTSIZE,10);
    ObjectSetString(0,id,OBJPROP_FONT,"Microsoft JhengHei");
 }
-void Panel()
+string ReadPanelFile(string name)
 {
-   string info="";
-   int h=FileOpen(base+"panel.txt",FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ|FILE_SHARE_WRITE,0,CP_UTF8);
-   if(h!=INVALID_HANDLE) { while(!FileIsEnding(h)) info+=FileReadString(h)+"\n"; FileClose(h); }
-   string next_pending=Read("pending.csv"); if(next_pending!=pending_id) panel_page=0; pending_id=next_pending;
-   string sizing=sizing_mode=="cash"?"risk cash "+DoubleToString(sizing_value,2):
-                 sizing_mode=="fixed_lots"?"fixed "+DoubleToString(sizing_value,3)+" lots":
-                 "risk "+DoubleToString(risk_pct,2)+"%";
-   string summary="AI Trader | "+(bound_mode=="real"?"REAL ACCOUNT":"DEMO ACCOUNT")+" | "+Account()+" | "+Server()+"\n"+
-           sizing+" / total "+DoubleToString(total_pct,2)+"% | policy "+(string)policy_version+"\n"+
-           "EA state="+Bool(state_ok)+" daily halt="+Bool(daily_halt)+" total halt="+Bool(total_halt)+" local pause="+Bool(local_pause)+"\n"+
-           "Bridge fresh="+Bool(policy_expiry>=Now())+" | "+status_text+"\n"+info;
-   string raw[],lines[]; int count=StringSplit(summary,'\n',raw);
+   string result="";
+   int h=FileOpen(base+name,FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ|FILE_SHARE_WRITE,0,CP_UTF8);
+   if(h==INVALID_HANDLE) return "";
+   while(!FileIsEnding(h)) { if(result!="") result+="\n"; result+=FileReadString(h); }
+   FileClose(h); return result;
+}
+int PanelLines(string source,string &lines[])
+{
+   ArrayResize(lines,0);
+   string raw[]; int count=StringSplit(source,'\n',raw);
    for(int i=0;i<count;i++)
       for(int start=0;start<MathMax(1,StringLen(raw[i]));start+=65)
       { int size=ArraySize(lines); ArrayResize(lines,size+1); lines[size]=StringSubstr(raw[i],start,65); }
-   panel_pages=MathMax(1,(ArraySize(lines)+19)/20); panel_page=MathMin(panel_page,panel_pages-1);
+   return ArraySize(lines);
+}
+void ScrollPanel(int delta)
+{
+   if(proposal_view) proposal_scroll=MathMax(0,MathMin(MathMax(0,proposal_total-14),proposal_scroll+delta));
+   else
+   {
+      chat_scroll=MathMax(0,MathMin(MathMax(0,chat_total-14),chat_scroll+delta));
+      chat_follow=(chat_scroll>=MathMax(0,chat_total-14));
+   }
+}
+void Panel()
+{
+   string next_pending=Read("pending.csv");
+   if(next_pending!=pending_id)
+   {
+      pending_id=next_pending; proposal_scroll=0;
+      proposal_view=(pending_id!="none"&&pending_id!="");
+   }
+   string status=ReadPanelFile("panel_status.txt");
+   string chat=ReadPanelFile("panel_chat.txt");
+   string proposal=ReadPanelFile("panel_proposal.txt");
+   if(proposal=="") proposal="目前沒有待確認提案。";
+   string status_lines[],chat_lines[],proposal_lines[];
+   StringSplit(status,'\n',status_lines);
+   chat_total=PanelLines(chat==""?"尚無對話。":chat,chat_lines);
+   proposal_total=PanelLines(proposal,proposal_lines);
+   if(chat!=last_chat)
+   {
+      last_chat=chat;
+      if(chat_follow) chat_scroll=MathMax(0,chat_total-14);
+   }
+   chat_scroll=MathMin(chat_scroll,MathMax(0,chat_total-14));
+   proposal_scroll=MathMin(proposal_scroll,MathMax(0,proposal_total-14));
+   string sizing=sizing_mode=="cash"?"單筆停損金額 "+DoubleToString(sizing_value,2):
+                 sizing_mode=="fixed_lots"?"每筆固定 "+DoubleToString(sizing_value,3)+" 手":
+                 "單筆風險 "+DoubleToString(risk_pct,2)+"%";
    string bg=prefix+"background";
    if(ObjectFind(0,bg)<0) ObjectCreate(0,bg,OBJ_RECTANGLE_LABEL,0,0,0);
    ObjectSetInteger(0,bg,OBJPROP_XDISTANCE,5); ObjectSetInteger(0,bg,OBJPROP_YDISTANCE,5);
-   ObjectSetInteger(0,bg,OBJPROP_XSIZE,920); ObjectSetInteger(0,bg,OBJPROP_YSIZE,525);
+   ObjectSetInteger(0,bg,OBJPROP_XSIZE,715); ObjectSetInteger(0,bg,OBJPROP_YSIZE,525);
    ObjectSetInteger(0,bg,OBJPROP_BGCOLOR,clrBlack); ObjectSetInteger(0,bg,OBJPROP_BACK,false);
    ObjectSetInteger(0,bg,OBJPROP_ZORDER,0);
-   for(int i=0;i<20;i++)
+   string summary[]={
+      (bound_mode=="real"?"實盤":"模擬")+"｜"+Server()+"｜"+Account()+"｜策略 v"+(string)policy_version,
+      sizing+"｜總持倉 "+DoubleToString(total_pct,2)+"%｜"+(local_pause?"暫停新單":"EA 允許新單"),
+      "EA "+(state_ok?"就緒":"需檢查")+"｜"+(policy_expiry>=Now()?"服務已連線":"等待服務")+"｜"+
+      (status_text=="Waiting for service"&&policy_expiry>=Now()?"已連線":status_text),
+      ArraySize(status_lines)>0?status_lines[0]:"等待服務狀態",
+      ArraySize(status_lines)>1?status_lines[1]:"尚無已確認策略",
+      ArraySize(status_lines)>2?"AI："+status_lines[2]:"AI：尚未呼叫"
+   };
+   for(int i=0;i<6;i++)
+   {
+      string label=prefix+"status"+(string)i;
+      if(ObjectFind(0,label)<0) ObjectCreate(0,label,OBJ_LABEL,0,0,0);
+      ObjectSetInteger(0,label,OBJPROP_XDISTANCE,14); ObjectSetInteger(0,label,OBJPROP_YDISTANCE,95+i*17);
+      ObjectSetInteger(0,label,OBJPROP_COLOR,i==0?clrAqua:clrWhite); ObjectSetInteger(0,label,OBJPROP_FONTSIZE,9);
+      ObjectSetString(0,label,OBJPROP_FONT,"Microsoft JhengHei");
+      ObjectSetString(0,label,OBJPROP_TEXT,StringSubstr(summary[i],0,73));
+   }
+   string viewport=prefix+"viewport";
+   if(ObjectFind(0,viewport)<0) ObjectCreate(0,viewport,OBJ_RECTANGLE_LABEL,0,0,0);
+   ObjectSetInteger(0,viewport,OBJPROP_XDISTANCE,10); ObjectSetInteger(0,viewport,OBJPROP_YDISTANCE,198);
+   ObjectSetInteger(0,viewport,OBJPROP_XSIZE,700); ObjectSetInteger(0,viewport,OBJPROP_YSIZE,260);
+   ObjectSetInteger(0,viewport,OBJPROP_BGCOLOR,clrBlack);
+   ObjectSetInteger(0,viewport,OBJPROP_COLOR,clrGray);
+   int offset=proposal_view?proposal_scroll:chat_scroll;
+   for(int i=0;i<14;i++)
    {
       string label=prefix+"line"+(string)i;
       if(ObjectFind(0,label)<0) ObjectCreate(0,label,OBJ_LABEL,0,0,0);
-      ObjectSetInteger(0,label,OBJPROP_XDISTANCE,14); ObjectSetInteger(0,label,OBJPROP_YDISTANCE,106+i*18);
+      ObjectSetInteger(0,label,OBJPROP_XDISTANCE,16); ObjectSetInteger(0,label,OBJPROP_YDISTANCE,202+i*18);
       ObjectSetInteger(0,label,OBJPROP_COLOR,clrWhite); ObjectSetInteger(0,label,OBJPROP_FONTSIZE,9);
       ObjectSetString(0,label,OBJPROP_FONT,"Microsoft JhengHei");
-      int idx=panel_page*20+i; ObjectSetString(0,label,OBJPROP_TEXT,idx<ArraySize(lines)?lines[idx]:" ");
+      int idx=offset+i;
+      string shown=" ";
+      if(proposal_view&&idx<proposal_total) shown=proposal_lines[idx];
+      if(!proposal_view&&idx<chat_total) shown=chat_lines[idx];
+      ObjectSetString(0,label,OBJPROP_TEXT,shown);
    }
-   Button("pause","暫停新單",10,12,145); Button("resume","啟動提案",165,12,145);
-   Button("close","平倉提案",320,12,145); Button("sync","查詢狀態",475,12,120);
-   Button("confirm","確認待辦",10,56,145); Button("reset","重設回撤",165,56,145);
-   Button("prev","上頁",320,56,120); Button("next","下頁 "+(string)(panel_page+1)+"/"+(string)panel_pages,450,56,160);
-   ChatInput(); Button("send","送出訊息",800,480,105);
+   Button("pause","暫停新單",10,12,130); Button("resume","申請啟動交易",145,12,155);
+   Button("close","平倉提案",305,12,130); Button("sync","查詢狀態",440,12,125);
+   Button("confirm","確認目前提案",10,54,145); Button("reset","重設回撤",160,54,130);
+   Button("chat","對話",295,54,75); Button("proposal","待確認提案",375,54,105);
+   Button("up","上捲",485,54,75); Button("down","下捲",565,54,75);
+   ObjectSetInteger(0,prefix+"chat",OBJPROP_BGCOLOR,proposal_view?clrWhite:clrSteelBlue);
+   ObjectSetInteger(0,prefix+"chat",OBJPROP_COLOR,proposal_view?clrBlack:clrWhite);
+   ObjectSetInteger(0,prefix+"proposal",OBJPROP_BGCOLOR,proposal_view?clrSteelBlue:clrWhite);
+   ObjectSetInteger(0,prefix+"proposal",OBJPROP_COLOR,proposal_view?clrWhite:clrBlack);
+   string count_id=prefix+"scroll_count";
+   if(ObjectFind(0,count_id)<0) ObjectCreate(0,count_id,OBJ_LABEL,0,0,0);
+   int total=proposal_view?proposal_total:chat_total;
+   ObjectSetInteger(0,count_id,OBJPROP_XDISTANCE,646);
+   ObjectSetInteger(0,count_id,OBJPROP_YDISTANCE,64);
+   ObjectSetInteger(0,count_id,OBJPROP_COLOR,clrWhite);
+   ObjectSetString(0,count_id,OBJPROP_TEXT,(string)(offset+1)+"-"+(string)MathMin(total,offset+14)+"/"+(string)total);
+   ChatInput(); Button("send","送出訊息",620,480,88);
    Comment("");
    ChartRedraw();
 }
 void OnChartEvent(const int event,const long &lparam,const double &dparam,const string &sparam)
 {
+   if(event==CHARTEVENT_MOUSE_WHEEL)
+   {
+      int x=(int)(short)lparam,y=(int)(short)(lparam>>16);
+      if(x>=10&&x<=710&&y>=198&&y<=458&&dparam!=0)
+      { ScrollPanel(dparam>0?-3:3); Panel(); }
+      return;
+   }
    if(event!=CHARTEVENT_OBJECT_CLICK||StringFind(sparam,prefix)!=0) return;
    string action=StringSubstr(sparam,StringLen(prefix));
    if(action=="chat_input") return;
    ObjectSetInteger(0,sparam,OBJPROP_STATE,false);
-   if(action=="prev") { panel_page=MathMax(0,panel_page-1); Panel(); return; }
-   if(action=="next") { panel_page=MathMin(panel_pages-1,panel_page+1); Panel(); return; }
+   if(action=="up"||action=="down") { ScrollPanel(action=="up"?-3:3); Panel(); return; }
+   if(action=="chat"||action=="proposal") { proposal_view=action=="proposal"; Panel(); return; }
    if(action=="send")
    {
       string message=ObjectGetString(0,prefix+"chat_input",OBJPROP_TEXT);
@@ -702,11 +786,16 @@ void OnChartEvent(const int event,const long &lparam,const double &dparam,const 
       if(!AccountMatched()) { status_text="帳號或模式不符，訊息未送出"; Panel(); return; }
       string chat_id=(string)Now()+"-"+(string)GetMicrosecondCount();
       bool sent=Append("ui.jsonl","{\"id\":"+J(chat_id)+",\"account\":"+J(Account())+",\"server\":"+J(Server())+",\"magic\":"+(string)InpMagic+",\"time\":"+(string)Now()+",\"action\":\"chat\",\"text\":"+J(message)+"}");
-      if(sent) { ObjectSetString(0,prefix+"chat_input",OBJPROP_TEXT,""); status_text="訊息已送出，等待回覆"; panel_page=0; }
+      if(sent) { ObjectSetString(0,prefix+"chat_input",OBJPROP_TEXT,""); status_text="訊息已送出，等待回覆"; proposal_view=false; chat_follow=true; }
       else status_text="訊息寫入失敗";
       Panel(); return;
    }
-   if(action=="confirm"&&panel_page<panel_pages-1) { status_text="Please read all proposal pages before confirming"; Panel(); return; }
+   if(action=="confirm")
+   {
+      if(pending_id=="none"||pending_id=="") { status_text="目前沒有待確認提案"; Panel(); return; }
+      if(!proposal_view) { proposal_view=true; proposal_scroll=0; status_text="請先閱讀待確認提案"; Panel(); return; }
+      if(proposal_scroll<MathMax(0,proposal_total-14)) { status_text="請先捲到提案末尾再確認"; Panel(); return; }
+   }
    if(action!="pause"&&action!="resume"&&action!="close"&&action!="sync"&&action!="confirm"&&action!="reset") return;
    if(action=="pause") { local_pause=true; enabled=false; SaveState(); }
    string id=(string)Now()+"-"+(string)GetMicrosecondCount();
@@ -820,6 +909,7 @@ int OnInit()
    ArrayCopy(configured_commissions,commissions);
    ArrayCopy(configured_spreads,spreads); ArrayCopy(configured_slips,slips);
    trade.SetExpertMagicNumber(InpMagic); trade.SetAsyncMode(false); trade.SetDeviationInPoints(10);
+   ChartSetInteger(0,CHART_EVENT_MOUSE_WHEEL,true);
    LoadState(); LoadUsed(); RefreshWatchlist(); ReadPolicy(); ReadPreviews(); Protect(); Snapshot(); Catalog(); Panel(); ExportDeals();
    EventSetTimer(1); return INIT_SUCCEEDED;
 }

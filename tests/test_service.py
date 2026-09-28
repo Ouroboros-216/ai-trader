@@ -229,8 +229,11 @@ def test_chart_chat_shows_human_readable_status_without_ai_call(agent):
     agent.panel_events()
     agent.publish()
     shown = (agent.bridge.root / "panel.txt").read_text(encoding="utf8")
+    chat = (agent.bridge.root / "panel_chat.txt").read_text(encoding="utf8")
+    status = (agent.bridge.root / "panel_status.txt").read_text(encoding="utf8")
     local = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime(event["time"]))
     assert f"[{local}] 你：狀態" in shown
+    assert f"[{local}] 你：狀態" in chat and "你：狀態" not in status
     assert "] 回覆：" in shown
     assert "你：狀態" in shown and "目前暫停新單" in shown and "目前沒有持倉" in shown
     assert '"暫停新單":true' not in shown
@@ -255,6 +258,24 @@ def test_panel_reply_from_old_version_still_displays(agent):
     agent.publish()
     shown = (agent.bridge.root / "panel.txt").read_text(encoding="utf8")
     assert "你：舊問題" in shown and "回覆：舊回覆" in shown
+
+
+def test_panel_proposal_is_human_readable_and_separate_from_chat(agent):
+    identifier = agent.propose("resume", {})
+    agent.publish()
+    proposal = (agent.bridge.root / "panel_proposal.txt").read_text(encoding="utf8")
+    chat = (agent.bridge.root / "panel_chat.txt").read_text(encoding="utf8")
+    assert "申請啟動自動交易" in proposal and identifier in proposal
+    assert "申請啟動自動交易" not in chat
+
+
+def test_policy_proposal_panel_shows_readable_terms_without_raw_json(agent, policy):
+    identifier = agent.propose("policy", policy | {"title": "新版短線策略"})
+    agent.publish()
+    proposal = (agent.bridge.root / "panel_proposal.txt").read_text(encoding="utf8")
+    assert "策略草案｜新版短線策略" in proposal
+    assert "進場條件" in proposal and identifier in proposal
+    assert '"risk_pct"' not in proposal
 
 
 def test_chart_chat_cannot_bypass_confirmation_or_wrong_magic(agent):

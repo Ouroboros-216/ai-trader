@@ -68,4 +68,7 @@ class Bridge:
 
     def status(self, data):
         atomic_write(self.root / "status.json", dumps(data))
-        atomic_write(self.root / "panel.txt", "\n".join(str(data.get(k, "")) for k in ("headline", "strategy", "api", "chat", "latest", "pending")))
+        atomic_write(self.root / "panel.txt", "\n".join(str(data.get(k, "")) for k in ("headline", "strategy", "api", "chat", "pending")))
+        atomic_write(self.root / "panel_status.txt", "\n".join(str(data.get(k, "")) for k in ("headline", "strategy", "api")))
+        atomic_write(self.root / "panel_chat.txt", str(data.get("chat", "")))
+        atomic_write(self.root / "panel_proposal.txt", str(data.get("pending", "")))

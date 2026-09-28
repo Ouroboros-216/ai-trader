@@ -268,7 +268,7 @@ class Agent:
             lines.extend(("", label + "：", paragraph(value)))
         lines.extend(("", "本次變更：" + ("、".join(changed) if before else "首次建立"),
                       "有疑問可直接回覆；明確說出要改的條件，系統會產生新版草案。",
-                      "按『接受草案』只保存策略，之後仍須另行確認『啟動』；不接受可按『不接受草案』。草案 10 分鐘後過期。",
+                      "在飛機按『接受草案』，或在 MT5 面板按『確認目前提案』，只會保存策略；之後仍須另行確認啟動交易。不接受可在飛機按『不接受草案』。草案 10 分鐘後過期。",
                       "確認 " + identifier))
         return "\n".join(lines)
 
@@ -881,10 +881,21 @@ class Agent:
                                            p.fixed_lots if p.risk_mode == "fixed_lots" else 0.0, ".8f")])
         pending = self.store.get("pending", "")
         row = self.store.db.execute("SELECT * FROM proposals WHERE id=? AND status='pending' AND expires>?", (pending, time.time())).fetchone()
-        pending_text = (row["kind"]+" "+row["id"]+"\n"+row["data"]) if row else ""
+        pending_text = ""
+        if row:
+            if row["kind"] == "policy":
+                proposed = StrategyPolicy.parse(json.loads(row["data"]), self.version()+1)
+                pending_text = self.policy_preview(proposed, p.to_dict() if p else {}, row["id"])
+            elif row["kind"] == "resume":
+                pending_text = "申請啟動自動交易。確認後才允許新單。\n提案編號：" + row["id"]
+            elif row["kind"] == "close":
+                ids = json.loads(row["data"]).get("ids", [])
+                pending_text = "申請暫停新單並平掉本系統持倉：" + "、".join(map(str, ids)) + "\n提案編號：" + row["id"]
+            elif row["kind"] == "reset":
+                pending_text = "申請重設回撤基準；確認後仍保持暫停新單。\n提案編號：" + row["id"]
         self.bridge.csv("pending.csv", [row["id"] if row else "none"])
         events = self.store.db.execute("SELECT data FROM events WHERE kind IN ('decision','execution','error') ORDER BY id DESC LIMIT 1").fetchone()
-        replies = self.store.db.execute("SELECT time,data FROM events WHERE kind='panel_reply' ORDER BY id DESC LIMIT 3").fetchall()
+        replies = self.store.db.execute("SELECT time,data FROM events WHERE kind='panel_reply' ORDER BY id DESC LIMIT 12").fetchall()
         def local_time(value):
             return time.strftime("%Y/%m/%d %H:%M:%S", time.localtime(value))
         chat_lines = []
