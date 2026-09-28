@@ -884,9 +884,16 @@ class Agent:
         pending_text = (row["kind"]+" "+row["id"]+"\n"+row["data"]) if row else ""
         self.bridge.csv("pending.csv", [row["id"] if row else "none"])
         events = self.store.db.execute("SELECT data FROM events WHERE kind IN ('decision','execution','error') ORDER BY id DESC LIMIT 1").fetchone()
-        replies = self.store.db.execute("SELECT data FROM events WHERE kind='panel_reply' ORDER BY id DESC LIMIT 3").fetchall()
-        chat = "\n".join("你：" + str(item.get("question", ""))[:1000] + "\n回覆：" + str(item.get("answer", ""))[:10000]
-                         for item in (json.loads(row[0]) for row in reversed(replies)))
+        replies = self.store.db.execute("SELECT time,data FROM events WHERE kind='panel_reply' ORDER BY id DESC LIMIT 3").fetchall()
+        def local_time(value):
+            return time.strftime("%Y/%m/%d %H:%M:%S", time.localtime(value))
+        chat_lines = []
+        for row in reversed(replies):
+            item = json.loads(row["data"])
+            chat_lines.append("[" + local_time(item.get("question_time", row["time"])) + "] 你：" +
+                              str(item.get("question", ""))[:1000] + "\n[" + local_time(row["time"]) + "] 回覆：" +
+                              str(item.get("answer", ""))[:10000])
+        chat = "\n".join(chat_lines)
         mode_label = "實盤" if self.cfg.get("account_mode", "demo") == "real" else "模擬"
         self.bridge.status({"time": int(time.time()), "headline": mode_label + " | " + ("暫停新單" if paused else "自動交易"),
                            "strategy": p.title if p else "尚無已確認策略", "api": self.api_status,
@@ -944,7 +951,8 @@ class Agent:
                     reply = self.handle(command)
                 except Exception as exc:
                     reply = "未套用：" + (str(exc) if isinstance(exc, ValueError) else type(exc).__name__)
-                self.store.event("panel_reply", {"question": command, "answer": reply})
+                self.store.event("panel_reply", {"question": command, "answer": reply,
+                                                 "question_time": event["time"]})
         self.store.set("ui_offset", offset)
 
     def tick(self):

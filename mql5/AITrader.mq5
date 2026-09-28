@@ -677,7 +677,7 @@ void Panel()
       int idx=panel_page*20+i; ObjectSetString(0,label,OBJPROP_TEXT,idx<ArraySize(lines)?lines[idx]:" ");
    }
    Button("pause","暫停新單",10,12,145); Button("resume","啟動提案",165,12,145);
-   Button("close","平倉提案",320,12,145); Button("sync","同步",475,12,120);
+   Button("close","平倉提案",320,12,145); Button("sync","查詢狀態",475,12,120);
    Button("confirm","確認待辦",10,56,145); Button("reset","重設回撤",165,56,145);
    Button("prev","上頁",320,56,120); Button("next","下頁 "+(string)(panel_page+1)+"/"+(string)panel_pages,450,56,160);
    ChatInput(); Button("send","送出訊息",800,480,105);

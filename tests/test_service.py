@@ -229,9 +229,32 @@ def test_chart_chat_shows_human_readable_status_without_ai_call(agent):
     agent.panel_events()
     agent.publish()
     shown = (agent.bridge.root / "panel.txt").read_text(encoding="utf8")
+    local = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime(event["time"]))
+    assert f"[{local}] 你：狀態" in shown
+    assert "] 回覆：" in shown
     assert "你：狀態" in shown and "目前暫停新單" in shown and "目前沒有持倉" in shown
     assert '"暫停新單":true' not in shown
     assert agent.provider.calls == []
+
+
+def test_chart_status_button_uses_local_time_and_no_ai_call(agent):
+    event = {"id": "sync-1", "account": "12345", "server": "TEST-Demo",
+             "time": int(time.time()), "action": "sync"}
+    atomic_write(agent.bridge.root / "ui.jsonl", json.dumps(event) + "\n")
+    agent.panel_events()
+    agent.publish()
+    shown = (agent.bridge.root / "panel.txt").read_text(encoding="utf8")
+    local = time.strftime("%Y/%m/%d %H:%M:%S", time.localtime(event["time"]))
+    assert f"[{local}] 你：狀態" in shown
+    assert "目前暫停新單" in shown
+    assert agent.provider.calls == []
+
+
+def test_panel_reply_from_old_version_still_displays(agent):
+    agent.store.event("panel_reply", {"question": "舊問題", "answer": "舊回覆"})
+    agent.publish()
+    shown = (agent.bridge.root / "panel.txt").read_text(encoding="utf8")
+    assert "你：舊問題" in shown and "回覆：舊回覆" in shown
 
 
 def test_chart_chat_cannot_bypass_confirmation_or_wrong_magic(agent):
