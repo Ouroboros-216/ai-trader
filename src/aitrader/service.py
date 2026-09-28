@@ -12,7 +12,7 @@ from .bridge import Bridge
 from .contracts import DecisionProposal, ExecutionResult, MarketSnapshot, StrategyPolicy, number
 from .provider import ADAPTERS, build_provider
 from .storage import Store, dumps
-from .symbols import ambiguous_choice, catalog, relevant
+from .symbols import ambiguous_choice, canonical, catalog, relevant
 from .watch import WatchCandidate
 
 REQUIRED_EA_VERSION = "1.013"
@@ -241,6 +241,64 @@ class Agent:
         return history
 
     @staticmethod
+    def asks_for_discussed_draft(message):
+        if message in {"好就這個", "就這份了", "就這份", "接受"}:
+            return True
+        return bool(re.search(r"(?:直接|現在|下一份).{0,16}(?:給我|產生|建立).{0,12}(?:草案|策略卡|正式採用)|正式採用.{0,8}草案", message))
+
+    @staticmethod
+    def is_complete_strategy_spec(message):
+        if len(message) < 100 or len(message.splitlines()) < 8 or any(mark in message for mark in ("？", "?")):
+            return False
+        return all(re.search(pattern, message, re.M) for pattern in (
+            r"^[ \t]*[-*]?[ \t]*商品[ \t]*[：:]",
+            r"^[ \t]*[-*]?[ \t]*(?:主交易週期|交易週期|分析週期)[ \t]*[：:]",
+            r"(?:風險設定|每筆風險|單筆風險)",
+            r"(?:模式[ \t]*[A-Z]|進場條件|進場規則)",
+            r"(?:停損|失效)",
+        ))
+
+    @staticmethod
+    def concise_draft_result(preview):
+        if not preview.startswith("需要釐清："):
+            return preview
+        try:
+            questions = json.loads(preview.removeprefix("需要釐清："))
+            question = str(questions[0]) if isinstance(questions, list) and questions else "請補充交易條件。"
+        except (ValueError, TypeError):
+            question = "請補充交易條件。"
+        return "還差一件事：" + question[:300]
+
+    def draft_from_discussion(self, message):
+        history = self.conversation_history(12)
+        user_requests = [item["user"] for item in history if item["user"].strip()]
+        if not user_requests and not re.search(r"(?:XAUUSD|EURUSD|GBPUSD|黃金|白銀|原油|比特幣|策略|進場|風險)", message, re.I):
+            return "目前沒有可整理的討論內容；請說明要交易的商品、方法與風險。"
+        instruction = ("依本帳號最近對話中使用者最後明確選定的條件，直接建立一份真正可確認的策略卡；"
+                       "先前列出的其他比較方案不算採用。不要只回覆討論稿，也不要自行啟動交易。"
+                       "這次使用者要求：" + message + "。"
+                       "最近使用者原話：" + "；".join(user_requests)[-3000:])
+        per_trade = None
+        for request in reversed(user_requests + [message]):
+            match = re.search(r"(?:每筆|單筆)(?:交易|風險)?\s*(\d+(?:\.\d+)?)\s*%", request)
+            if match:
+                per_trade = float(match.group(1))
+                break
+        required_timeframes = set()
+        for request in reversed(user_requests + [message]):
+            required_timeframes = {tf.upper() for tf in re.findall(r"\b(?:M5|M15|H1|H4)\b", request, re.I)}
+            if required_timeframes:
+                break
+        exact_symbols = None
+        for request in reversed(user_requests + [message]):
+            chosen = re.search(r"只做[ \t]*([A-Za-z0-9_.#-]{3,100})\b", request, re.I)
+            if chosen:
+                exact_symbols = [chosen.group(1)]
+                break
+        return self.concise_draft_result(self.draft(instruction, per_trade=per_trade, discussion_context=True,
+                                                     required_timeframes=required_timeframes, exact_symbols=exact_symbols))
+
+    @staticmethod
     def policy_preview(policy, before, identifier):
         labels = {"title": "名稱", "instructions": "適用範圍", "direction": "交易方向",
                   "symbols": "商品", "timeframes": "週期", "entry": "進場條件",
@@ -358,7 +416,7 @@ class Agent:
         return self.draft(instruction, auto=True, per_trade=per_trade, total=total, risk_change=risk_change)
 
     def draft(self, instruction, auto=False, per_trade=None, total=None, pending_policy=None,
-              risk_change=None, discussion_context=False, required_timeframes=()):
+              risk_change=None, discussion_context=False, required_timeframes=(), exact_symbols=None):
         snapshot = self.snapshot()
         if snapshot.get("ea_version") != REQUIRED_EA_VERSION:
             raise ValueError("請先在 MT5 重新掛載 v1.013 EA，再建立策略")
@@ -436,6 +494,8 @@ class Agent:
         policy = StrategyPolicy.parse(proposed, self.version()+1)
         if set(required_timeframes) - set(policy.timeframes):
             raise ValueError("AI 草案未保留選定方案的分析週期；草案未建立")
+        if exact_symbols is not None and {canonical(symbol) for symbol in policy.symbols} != {canonical(symbol) for symbol in exact_symbols}:
+            raise ValueError("AI 草案未保留指定交易商品；草案未建立")
         if policy.risk_mode == "cash":
             currency = snapshot.get("currency", "")
             if not currency:
@@ -548,6 +608,15 @@ class Agent:
             return self.risk_draft(*risk, message)
         if message.startswith(("策略 ", "/strategy ")):
             return self.draft(message.split(" ", 1)[1])
+        if self.is_complete_strategy_spec(message):
+            symbol_line = re.search(r"^[ \t]*[-*]?[ \t]*商品[ \t]*[：:][ \t]*([^\r\n]+)", message, re.M)
+            exact_symbols = [symbol.strip() for symbol in re.split(r"[,，、]", symbol_line.group(1)) if symbol.strip()]
+            if not exact_symbols or any(not re.fullmatch(r"[A-Za-z0-9_.#-]+", symbol) for symbol in exact_symbols):
+                exact_symbols = None
+            risk_match = re.search(r"(?:每筆|單筆)(?:交易|風險|權益)?[^\d%\r\n]{0,12}(\d+(?:\.\d+)?)\s*%", message)
+            required_timeframes = {tf.upper() for tf in re.findall(r"\b(?:M5|M15|H1|H4)\b", message, re.I)}
+            return self.concise_draft_result(self.draft(message, per_trade=float(risk_match.group(1)) if risk_match else None,
+                                                   required_timeframes=required_timeframes, exact_symbols=exact_symbols))
         revision = re.fullmatch(r"(?:修改|調整|改成)[：:]?\s+(.+)|(?:修改|調整|改成)[：:]\s*(.+)", message)
         if revision:
             return self.revise_draft(next(part for part in revision.groups() if part is not None))
@@ -559,6 +628,11 @@ class Agent:
             if not detail:
                 return "請說明要採用的商品、方法與風險，例如『整理成草案 XAUUSD 高頻剝頭皮，每筆 1%』。"
             return self.draft(detail, discussion_context=True)
+        if self.asks_for_discussed_draft(message):
+            pending_id, pending = self.pending_policy()
+            if pending:
+                return "已有待確認策略草案；請按『接受草案』或『不接受草案』，想改內容可直接說明。\n確認 " + pending_id
+            return self.draft_from_discussion(message)
         if message.startswith(("確認 ", "/confirm ")):
             identifier = message.split(" ", 1)[1].strip()
             try:
@@ -569,6 +643,8 @@ class Agent:
         if message in {"接受草案", "不接受草案"} or message.startswith("拒絕草案 "):
             identifier = message.split(" ", 1)[1].strip() if message.startswith("拒絕草案 ") else self.pending_policy()[0]
             if not identifier:
+                if message == "接受草案":
+                    return self.draft_from_discussion(message)
                 raise ValueError("目前沒有有效的待確認策略草案")
             return self.confirm(identifier) if message == "接受草案" else self.reject_policy(identifier)
         if message in {"暫停", "/pause"}:

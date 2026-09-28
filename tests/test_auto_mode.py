@@ -81,6 +81,107 @@ def test_chat_remembers_discussion_and_explicit_request_creates_only_draft(agent
     assert agent.store.get("paused", True) is True
 
 
+def test_discussed_short_scalping_plan_creates_a_real_pending_card(agent, policy, tmp_path):
+    agent.store.set("policy", None)
+    router = AccountRouter({"demo-a": agent}, Store(tmp_path / "router.sqlite"))
+    router.handle("12345")
+    agent.provider.response = {"answer": "可用 M5 短線順勢與 M5 區間反轉，M15/H1 分辨環境。"}
+    router.handle("我想試剝頭皮，每筆1%風險")
+    router.handle("兩種模式都做，M5 持倉幾分鐘到一小時，只做 XAUUSD")
+    agent.provider.response = {"policy": policy | {"title": "XAUUSD 雙模式短線", "direction": "BOTH",
+                                                    "symbols": ["XAUUSD"]}, "questions": []}
+    reply = router.handle("直接給我草案")
+    pending = agent.store.get("pending")
+    assert "策略草案" in reply and pending in reply
+    assert agent.provider.calls[-1][0] == "strategy"
+    request = agent.provider.calls[-1][1]
+    assert "XAUUSD" in request["request"] and request["available_symbols"] == ["XAUUSD", "EURUSD"]
+    assert agent.pending_policy()[1]["risk_pct"] == 1.0
+    assert agent.policy() is None and agent.store.get("paused", True) is True
+    buttons = router.reply_markup("直接給我草案", reply, pending)["inline_keyboard"][0]
+    assert [item["text"] for item in buttons] == ["接受草案", "不接受草案"]
+    assert "已套用" in router.handle("接受草案")
+    assert agent.policy().risk_pct == 1.0 and agent.store.get("paused", True) is True
+
+
+def test_accept_without_pending_creates_card_from_discussion_before_any_confirmation(agent, policy):
+    agent.store.set("policy", None)
+    agent.provider.response = {"answer": "採用 XAUUSD M5 順勢與區間反轉，每筆 1%。"}
+    agent.handle("我想做 XAUUSD M5，順勢和區間反轉都做，每筆1%")
+    agent.provider.response = {"policy": policy | {"direction": "BOTH", "symbols": ["XAUUSD"],
+                                                    "risk_pct": 1.0}, "questions": []}
+    preview = agent.handle("接受草案")
+    assert "策略草案" in preview
+    assert agent.store.get("pending") and agent.policy() is None
+    assert agent.store.get("paused", True) is True
+    assert agent.handle("接受草案").startswith("已套用")
+    assert agent.policy().risk_pct == 1.0 and agent.store.get("paused", True) is True
+
+
+def test_short_acceptance_without_discussion_does_not_call_ai(agent):
+    agent.store.set("policy", None)
+    assert "沒有可整理的討論內容" in agent.handle("就這份了")
+    assert "沒有可整理的討論內容" in agent.handle("接受草案")
+    assert agent.provider.calls == []
+    assert agent.store.db.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 0
+
+
+def test_discussed_draft_missing_one_detail_asks_one_plain_question(agent):
+    agent.provider.response = {"answer": "XAUUSD 可以討論順勢交易。"}
+    agent.handle("我想做 XAUUSD M5 順勢")
+    agent.provider.response = {"policy": None, "questions": ["每筆風險要多少？", "只做多還是多空？"]}
+    reply = agent.handle("直接給我草案")
+    assert reply == "還差一件事：每筆風險要多少？"
+    assert agent.store.get("pending", "") == ""
+
+
+def test_pasted_complete_strategy_creates_pending_card_without_command_prefix(agent, policy, tmp_path):
+    agent.store.set("policy", None)
+    router = AccountRouter({"demo-a": agent}, Store(tmp_path / "router.sqlite"))
+    router.handle("12345")
+    message = """商品：XAUUSD
+主交易週期：M5
+方向過濾週期：M15、H1
+持倉時間：幾分鐘至 1 小時內
+交易模式：雙模式分流
+風險設定：每筆權益 1%
+模式 A：M5 短線順勢
+- M15 與 H1 方向一致時，等 M5 回踩後續動進場
+- 停損放在 M5 結構低點或高點外
+模式 B：M5 區間反轉
+- 邊界測試後拒絕或假突破收回，再考慮進場
+- 停損放在區間外側
+分流原則：趨勢做順勢，震盪做反轉。"""
+    agent.provider.response = {"policy": policy | {"title": "XAUUSD 雙模式短線", "direction": "BOTH",
+                                                    "symbols": ["XAUUSD"], "timeframes": ["M5", "M15", "H1"]},
+                               "questions": []}
+    reply = router.handle(message)
+    pending = agent.store.get("pending")
+    assert "策略草案" in reply and pending in reply
+    assert [kind for kind, _ in agent.provider.calls] == ["strategy"]
+    assert agent.pending_policy()[1]["risk_pct"] == 1.0
+    buttons = router.reply_markup(message, reply, pending)["inline_keyboard"][0]
+    assert [item["text"] for item in buttons] == ["接受草案", "不接受草案"]
+    assert agent.policy() is None and agent.store.get("paused", True) is True
+    assert not agent.is_complete_strategy_spec(message + "\n這個方式可以嗎？")
+
+
+def test_pasted_strategy_rejects_model_that_changes_the_only_symbol(agent, policy):
+    message = """商品：XAUUSD
+主交易週期：M5
+方向過濾週期：M15、H1
+風險設定：每筆權益 1%
+模式 A：回踩順勢進場，停損在結構外
+模式 B：區間邊緣拒絕後反轉
+出場：一小時內平倉
+失效：收盤突破原區間
+管理：不得放寬停損。"""
+    agent.provider.response = {"policy": policy | {"symbols": ["EURUSD"], "risk_pct": 1.0}, "questions": []}
+    with pytest.raises(ValueError, match="未保留指定交易商品"):
+        agent.handle(message)
+    assert agent.store.db.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 0
+
+
 def test_colon_revision_works_on_confirmed_policy_without_pending_card(agent, policy):
     agent.provider.response = {"policy": policy | {"risk_pct": 1.0}, "questions": []}
     preview = agent.handle("修改：將單筆風險改為 1%")
