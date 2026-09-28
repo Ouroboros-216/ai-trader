@@ -16,7 +16,7 @@ def provider(agent, monkeypatch, transport, max_calls=1):
     return Gemini(cfg, agent.store, transport)
 
 
-def test_timeout_consumes_quota_and_never_logs_secret(agent, monkeypatch):
+def test_timeout_is_logged_and_never_logs_secret(agent, monkeypatch):
     def fail(*args):
         raise TimeoutError("unit-test-secret")
     client = provider(agent, monkeypatch, fail)
@@ -25,7 +25,7 @@ def test_timeout_consumes_quota_and_never_logs_secret(agent, monkeypatch):
     with pytest.raises(ValueError):
         client.call("chat", {})
     rows = [dict(r) for r in agent.store.db.execute("SELECT * FROM calls")]
-    assert len(rows) == 1 and rows[0]["status"] == "TimeoutError"
+    assert len(rows) == 2 and all(row["status"] == "TimeoutError" for row in rows)
     assert "unit-test-secret" not in json.dumps(rows)
 
 

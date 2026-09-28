@@ -48,8 +48,6 @@ def load_config(path):
         raise ValueError("AI provider adapter not installed")
     if p.get("api_key_env") != {"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY"}[p["kind"]]:
         raise ValueError("AI API 金鑰來源與所選供應商不一致")
-    number(p["max_calls_per_day"], 1, 10000)
-    number(p.get("max_tokens_per_day", 250000), 1000, 100000000)
     number(p["min_interval_seconds"], 1, 3600)
     number(p["timeout_seconds"], 1, 60)
     if p["kind"] == "openai":
@@ -337,7 +335,7 @@ class Agent:
         return self.draft(instruction, auto=True, per_trade=per_trade, total=total, risk_change=risk_change)
 
     def draft(self, instruction, auto=False, per_trade=None, total=None, pending_policy=None,
-              risk_change=None, discussion_context=False):
+              risk_change=None, discussion_context=False, required_timeframes=()):
         snapshot = self.snapshot()
         if snapshot.get("ea_version") != REQUIRED_EA_VERSION:
             raise ValueError("請先在 MT5 重新掛載 v1.011 EA，再建立策略")
@@ -413,6 +411,8 @@ class Agent:
                              "risk_amount": amount if field == "risk_amount" else 0.0,
                              "fixed_lots": amount if field == "fixed_lots" else 0.0}
         policy = StrategyPolicy.parse(proposed, self.version()+1)
+        if set(required_timeframes) - set(policy.timeframes):
+            raise ValueError("AI 草案未保留選定方案的分析週期；草案未建立")
         if policy.risk_mode == "cash":
             currency = snapshot.get("currency", "")
             if not currency:
@@ -489,6 +489,32 @@ class Agent:
 
     def handle(self, message):
         message = message.strip()
+        if message == "查看策略":
+            policy = self.policy()
+            pending_id, pending = self.pending_policy()
+            if not policy and not pending:
+                return "尚無已確認策略或待確認草案。可直接討論，或傳『自動模式』建立草案。"
+            parts = []
+            if policy:
+                parts.append("已確認策略｜" + policy.title + " v" + str(policy.version) +
+                             "\n商品：" + "、".join(policy.symbols) +
+                             "\n方向：" + {"BUY": "只做多", "SELL": "只做空", "BOTH": "多空皆可"}[policy.direction] +
+                             "\n週期：" + "、".join(policy.timeframes) +
+                             "\n單筆風險：" + (str(policy.risk_pct) + "%" if policy.risk_mode == "percent" else
+                                              str(policy.risk_amount) + " 帳戶幣別" if policy.risk_mode == "cash" else
+                                              str(policy.fixed_lots) + " 手") +
+                             "\n狀態：" + ("暫停新單" if self.store.get("paused", True) else "自動交易已啟用"))
+            if pending:
+                parts.append("待確認草案｜" + str(pending.get("title", "未命名")) +
+                             "\n尚未套用；可傳『查看草案』檢查完整內容。")
+            return "\n\n".join(parts)
+        if message == "查看草案":
+            identifier, data = self.pending_policy()
+            if not data:
+                return "目前沒有有效的待確認策略草案。"
+            policy = StrategyPolicy.parse(data, self.version()+1)
+            current = self.policy()
+            return self.policy_preview(policy, current.to_dict() if current else {}, identifier)
         if message in {"/start", "/help", "說明"}:
             return "可以直接和 AI 討論策略、風險與固定手數；討論不會改動交易設定。\n自動模式：AI 依目前商品行情提出交易方法。\n策略 用SMC只做空…\n整理成草案 你的方案｜修改：你的要求\n狀態｜持倉｜原因｜暫停｜啟動｜平倉｜重設回撤\n確認 <提案ID>\n草案確認後仍須另行確認啟動。"
         if message in {"自動模式", "/auto"} or message.startswith(("自動模式 ", "/auto ")):

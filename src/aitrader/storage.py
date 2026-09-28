@@ -61,19 +61,6 @@ class Store:
             if now < backoff:
                 raise ValueError("AI API 暫時等待約 " + str(int(backoff-now)+1) + " 秒後再試")
             last = self.db.execute("SELECT MAX(time) FROM calls").fetchone()[0]
-            count = self.db.execute("SELECT COUNT(*) FROM calls WHERE time>=?", (int(now // 86400) * 86400,)).fetchone()[0]
-            if count >= cfg["max_calls_per_day"]:
-                raise ValueError("API local quota reached")
-            total_tokens = 0
-            for row in self.db.execute("SELECT usage FROM calls WHERE time>=? AND usage IS NOT NULL",
-                                       (int(now // 86400) * 86400,)):
-                try:
-                    usage = json.loads(row[0])
-                    total_tokens += max(0, int(usage.get("totalTokenCount", usage.get("total_tokens", 0))))
-                except (TypeError, ValueError, AttributeError):
-                    continue
-            if total_tokens >= cfg.get("max_tokens_per_day", 250000):
-                raise ValueError("本機每日 AI token 用量已達設定值；停止新呼叫")
             if last is not None and now - last < cfg["min_interval_seconds"]:
                 raise ValueError("API local cooldown active")
             return self.db.execute("INSERT INTO calls(time,kind,model,status) VALUES(?,?,?,'reserved')", (now, kind, cfg["model"])).lastrowid

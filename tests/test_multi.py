@@ -175,7 +175,7 @@ def test_chinese_account_menu_and_back_remove_scope(tmp_path):
     select = router.callback_message(choices[0][0]["callback_data"])
     selected = router.handle(select)
     labels = [button["text"] for row in router.reply_markup(select, selected, "")["inline_keyboard"] for button in row]
-    assert labels == ["狀態", "持倉", "原因", "策略", "自動模式", "全部策略", "暫停", "啟動", "平倉", "重設回撤", "返回帳號清單"]
+    assert labels == ["狀態", "原因", "查看策略", "討論／修改策略", "自動模式", "全部策略", "交易管理", "返回帳號清單"]
     auto = next(button["callback_data"] for row in router.reply_markup(select, selected, "")["inline_keyboard"]
                 for button in row if button["text"] == "自動模式")
     assert router.handle(router.callback_message(auto)) == "【Demo｜101】\nok"
@@ -211,6 +211,94 @@ def test_old_menu_button_cannot_act_after_switch(tmp_path):
     with pytest.raises(ValueError, match="已切換帳號"):
         router.callback_message(old)
     assert not a.messages and not b.messages
+
+
+def test_menu_shows_only_contextual_common_actions(agent, tmp_path, monkeypatch):
+    router = AccountRouter({"demo-a": agent}, Store(tmp_path / "router.sqlite"))
+    router.handle("12345")
+    def labels(command):
+        return [button["text"] for row in router.reply_markup(command, "", "")["inline_keyboard"] for button in row]
+    normal = labels("帳號 12345")
+    assert {"狀態", "原因", "查看策略", "討論／修改策略", "交易管理"} <= set(normal)
+    assert not {"暫停", "啟動", "平倉", "重設回撤"} & set(normal)
+    assert "啟動" in labels("交易管理") and "平倉" not in labels("交易管理")
+    assert "返回主選單" in labels("交易管理")
+    assert "已返回" in router.handle("返回主選單") and router.selected() == "demo-a"
+    agent.store.set("paused", False)
+    assert "暫停" in labels("交易管理") and "啟動" not in labels("交易管理")
+    monkeypatch.setattr(agent, "snapshot", lambda: {"positions": [{"owned": True}], "halted": True})
+    assert {"暫停", "平倉"} <= set(labels("交易管理"))
+    assert "重設回撤" not in labels("交易管理")  # Open positions make reset inapplicable.
+    assert "持倉" in labels("狀態")
+    monkeypatch.setattr(agent, "snapshot", lambda: {"positions": [], "halted": True, "total_halt": True})
+    assert "重設回撤" in labels("交易管理")
+    agent.store.set("paused", True)
+    assert "啟動" not in labels("交易管理")
+    monkeypatch.setattr(agent, "snapshot", lambda: {"positions": [], "halted": True, "total_halt": False})
+    assert "重設回撤" not in labels("交易管理")  # A daily halt alone cannot reset drawdown.
+    monkeypatch.setattr(agent, "pending_policy", lambda: ("x" * 32, {"title": "草案"}))
+    assert "查看草案" in labels("狀態")
+
+
+def test_choosing_ai_option_is_local_and_draft_is_account_bound(agent, policy, tmp_path):
+    router = AccountRouter({"demo-a": agent}, Store(tmp_path / "router.sqlite"))
+    router.handle("12345")
+    agent.provider.response = {"answer": "XAUUSD 採 M5 短線，討論每筆 1% 風險。\n\n方案A：維持 0.5%\n- 先觀察。\n\n方案B：每筆 1% 做 M5 短線\n- 持倉約 5–15 分鐘。"}
+    discussed = router.handle("比較短線方案")
+    assert "方案B" in discussed and len(agent.provider.calls) == 1
+    rows = router.reply_markup("比較短線方案", discussed, "")["inline_keyboard"]
+    option_button = next(button for row in rows for button in row if button["text"].startswith("方案 B"))
+    assert "已選方案 B" in router.handle(router.callback_message(option_button["callback_data"]))
+    assert len(agent.provider.calls) == 1  # Selecting an option never calls AI or changes policy.
+    assert "整理選定方案" in [button["text"] for row in router.reply_markup("選方案 B", "", "")["inline_keyboard"] for button in row]
+    agent.provider.response = {"policy": policy | {"title": "M5 短線", "risk_pct": 1.0}, "questions": []}
+    preview = router.handle("整理選定方案")
+    assert "策略草案" in preview and "單筆 1.0%" in preview
+    assert agent.provider.calls[-1][0] == "strategy"
+    assert "方案 B" in agent.provider.calls[-1][1]["request"]
+    assert agent.store.get("policy") == policy and agent.store.get("paused", True) is True
+    assert router.store.get("pending") == agent.store.get("pending")
+
+
+def test_selected_option_rejects_wrong_model_timeframe_before_creating_proposal(agent, policy, tmp_path):
+    router = AccountRouter({"demo-a": agent}, Store(tmp_path / "router.sqlite"))
+    router.handle("12345")
+    agent.provider.response = {"answer": "討論 XAUUSD 每筆 1%。\n\n方案A：M15 波段\n\n方案B：M5 短線，每筆 1%"}
+    router.handle("比較")
+    router.handle("B")
+    agent.provider.response = {"policy": policy | {"timeframes": ["M15", "H1", "H4"]}, "questions": []}
+    with pytest.raises(ValueError, match="分析週期"):
+        router.handle("整理選定方案")
+    assert agent.store.db.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 0
+    assert agent.store.get("policy") == policy
+
+
+def test_new_discussion_invalidates_old_option_selection(agent, tmp_path):
+    router = AccountRouter({"demo-a": agent}, Store(tmp_path / "router.sqlite"))
+    router.handle("12345")
+    agent.provider.response = {"answer": "方案A：舊方法\n\n方案B：舊方法二"}
+    router.handle("比較")
+    router.handle("B")
+    agent.provider.response = {"answer": "我們改談其他問題。"}
+    router.handle("那商品規格呢？")
+    assert "沒有有效" in router.handle("B")
+    assert "已過期" in router.handle("整理選定方案")
+
+
+def test_stale_or_other_account_option_button_is_rejected(tmp_path):
+    a, b = FakeAgent("101", tmp_path / "a.sqlite"), FakeAgent("202", tmp_path / "b.sqlite")
+    router = AccountRouter({"demo-a": a, "demo-b": b}, Store(tmp_path / "router.sqlite"))
+    router.handle("101")
+    router.remember_options("demo-a", "方案A：先觀察\n\n方案B：短線")
+    callback = next(button["callback_data"] for row in router.reply_markup("狀態", "", "")["inline_keyboard"]
+                    for button in row if button["text"].startswith("方案 B"))
+    router.handle("202")
+    with pytest.raises(ValueError, match="已切換帳號"):
+        router.callback_message(callback)
+    router.handle("101")
+    router.remember_options("demo-a", "方案A：新觀察\n\n方案B：新短線")
+    with pytest.raises(ValueError, match="已過期"):
+        router.callback_message(callback)
 
 
 def test_telegram_menu_callback_and_private_chinese_slash_descriptions(tmp_path, monkeypatch):
@@ -419,7 +507,7 @@ def test_execution_context_is_account_specific_and_sent_to_decision_model(agent,
         other.close()
 
 
-def test_shared_api_quota_applies_to_multiple_account_stores(tmp_path, monkeypatch):
+def test_shared_api_interval_applies_to_multiple_account_stores(tmp_path, monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "unit-test-key")
     quota, a, b = (Store(tmp_path / name) for name in ("quota.sqlite", "a.sqlite", "b.sqlite"))
     cfg = {"enabled": True, "model": "gemini-test", "api_key_env": "GEMINI_API_KEY",
@@ -428,18 +516,17 @@ def test_shared_api_quota_applies_to_multiple_account_stores(tmp_path, monkeypat
     response = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": '{"answer":"ok"}'}]}}]}
     transport = lambda *_: response
     assert Gemini(cfg, a, transport, quota).call("chat", {}) == {"answer": "ok"}
-    with pytest.raises(ValueError, match="quota"):
+    with pytest.raises(ValueError, match="cooldown"):
         Gemini(cfg, b, transport, quota).call("chat", {})
     assert a.recent()[-1]["kind"] == "provider_response"
     assert not b.recent()
 
 
-def test_shared_quota_distinguishes_cooldown_from_daily_limit(tmp_path):
+def test_shared_cooldown_without_local_daily_limit(tmp_path):
     store = Store(tmp_path / "quota.sqlite")
     cfg = {"model": "gemini-test", "max_calls_per_day": 2, "min_interval_seconds": 15}
     store.reserve_call("decisions", cfg, 1000)
     with pytest.raises(ValueError, match="cooldown"):
         store.reserve_call("decisions", cfg, 1001)
     store.reserve_call("decisions", cfg, 1016)
-    with pytest.raises(ValueError, match="quota"):
-        store.reserve_call("decisions", cfg, 1032)
+    store.reserve_call("decisions", cfg, 1032)

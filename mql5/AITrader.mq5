@@ -485,7 +485,7 @@ string Bars(string symbol,ENUM_TIMEFRAMES tf,bool &ready)
 }
 void Snapshot()
 {
-   string out="{\"schema\":1,\"ea_version\":\"1.011\",\"account\":"+J(Account())+",\"server\":"+J(Server())+",\"magic\":"+(string)InpMagic+",\"demo\":"+Bool(IsDemo())+",\"account_mode\":"+J(bound_mode)+",\"live_enabled\":"+Bool(live_allowed)+",\"time\":"+(string)Now()+",\"equity\":"+Num(AccountInfoDouble(ACCOUNT_EQUITY))+",\"balance\":"+Num(AccountInfoDouble(ACCOUNT_BALANCE))+",\"currency\":"+J(AccountInfoString(ACCOUNT_CURRENCY))+",\"state_ok\":"+Bool(state_ok)+",\"halted\":"+Bool(daily_halt||total_halt||!state_ok)+",\"local_pause\":"+Bool(local_pause)+",\"missing_symbols\":["+missing+"],\"positions\":[";
+   string out="{\"schema\":1,\"ea_version\":\"1.011\",\"account\":"+J(Account())+",\"server\":"+J(Server())+",\"magic\":"+(string)InpMagic+",\"demo\":"+Bool(IsDemo())+",\"account_mode\":"+J(bound_mode)+",\"live_enabled\":"+Bool(live_allowed)+",\"time\":"+(string)Now()+",\"equity\":"+Num(AccountInfoDouble(ACCOUNT_EQUITY))+",\"balance\":"+Num(AccountInfoDouble(ACCOUNT_BALANCE))+",\"currency\":"+J(AccountInfoString(ACCOUNT_CURRENCY))+",\"state_ok\":"+Bool(state_ok)+",\"halted\":"+Bool(daily_halt||total_halt||!state_ok)+",\"daily_halt\":"+Bool(daily_halt)+",\"total_halt\":"+Bool(total_halt)+",\"local_pause\":"+Bool(local_pause)+",\"missing_symbols\":["+missing+"],\"positions\":[";
    int count=0;
    for(int i=0;i<PositionsTotal();i++)
    {

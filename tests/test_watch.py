@@ -88,7 +88,7 @@ def test_ai_snapshot_only_sends_policy_symbols_and_bounded_bars(agent, snapshot,
     assert len(compact["symbols"]["XAUUSD"]["bars"]["M15"][0]) == 6
 
 
-def test_daily_token_gate_counts_gemini_and_openai_usage(tmp_path):
+def test_recorded_usage_does_not_block_new_calls(tmp_path):
     store = Store(tmp_path / "quota.sqlite")
     now = time.time()
     with store.db:
@@ -98,6 +98,5 @@ def test_daily_token_gate_counts_gemini_and_openai_usage(tmp_path):
                          (now, "chat", "openai", "ok", '{"total_tokens":80}'))
     cfg = {"model": "test", "max_calls_per_day": 10, "max_tokens_per_day": 200,
            "min_interval_seconds": 0}
-    with pytest.raises(ValueError, match="token"):
-        store.reserve_call("decisions", cfg, now + 1)
+    assert store.reserve_call("decisions", cfg, now + 1) > 0
     store.db.close()

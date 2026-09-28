@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import hashlib
 import json
+import re
 import signal
 import time
 import uuid
@@ -22,8 +23,9 @@ from .telegram import Telegram
 
 
 MENU_COMMANDS = {
-    "status": "狀態", "positions": "持倉", "why": "原因", "strategy": "策略", "auto": "自動模式",
-    "strategy_all": "全部策略",
+    "status": "狀態", "positions": "持倉", "why": "原因", "strategy": "查看策略", "draft": "查看草案",
+    "discuss": "討論／修改策略", "auto": "自動模式", "draft_selected": "整理選定方案",
+    "manage": "交易管理", "home": "返回主選單", "strategy_all": "全部策略",
     "pause": "暫停", "resume": "啟動", "close": "平倉", "reset": "重設回撤",
 }
 
@@ -71,7 +73,23 @@ class AccountRouter:
             identifier = self.account_from_token(parts[1])
             if self.selected() != identifier:
                 raise ValueError("已切換帳號；請使用目前帳號的新指令按鈕")
+            visible = {button["callback_data"] for command in ("狀態", "交易管理")
+                       for row in self.reply_markup(command, "", "")["inline_keyboard"]
+                       for button in row}
+            if data not in visible:
+                raise ValueError("此操作目前不適用；請使用最新的選單")
             return MENU_COMMANDS[parts[2]]
+        if data.startswith("c:"):
+            parts = data.split(":")
+            if len(parts) != 4 or parts[3] not in "ABC":
+                raise ValueError("方案按鈕無效")
+            identifier = self.account_from_token(parts[1])
+            if self.selected() != identifier:
+                raise ValueError("已切換帳號；請使用目前帳號的新方案按鈕")
+            options = self.active_options(identifier)
+            if not options or options["nonce"] != parts[2] or parts[3] not in options["items"]:
+                raise ValueError("方案選項已過期；請重新討論並選擇")
+            return "選方案 " + parts[3]
         if data.startswith("b:"):
             identifier = self.account_from_token(data[2:])
             if self.selected() != identifier:
@@ -91,17 +109,83 @@ class AccountRouter:
         token = self.account_token(identifier)
         def button(key):
             return {"text": MENU_COMMANDS[key], "callback_data": "m:" + token + ":" + key}
-        rows = [[button("status"), button("positions")],
-                [button("why"), button("strategy")],
-                [button("auto")],
-                [button("strategy_all")],
-                [button("pause"), button("resume")],
-                [button("close"), button("reset")]]
+        agent = self.agents[identifier]
+        policy = agent.policy() if hasattr(agent, "policy") else None
+        paused = agent.store.get("paused", True)
+        pending_policy = agent.pending_policy()[1] if hasattr(agent, "pending_policy") else None
+        snapshot = None
+        if hasattr(agent, "snapshot"):
+            try:
+                snapshot = agent.snapshot()
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        owned = bool(snapshot and any(p.get("owned") for p in snapshot.get("positions", [])))
+        halted = bool(snapshot and snapshot.get("halted"))
+        drawdown_locked = bool(snapshot and snapshot.get("total_halt"))
+        if command == "交易管理":
+            actions = []
+            if policy and not paused:
+                actions.append(button("pause"))
+            elif policy and snapshot and snapshot.get("state_ok") is True and not halted:
+                actions.append(button("resume"))
+            if owned:
+                actions.append(button("close"))
+            if drawdown_locked and not owned:
+                actions.append(button("reset"))
+            rows = [[action] for action in actions] or [[button("status")]]
+            rows.append([button("status"), button("why")])
+            rows.append([button("home")])
+        else:
+            rows = [[button("status"), button("why")], [button("strategy"), button("discuss")]]
+            if pending_policy:
+                rows.append([button("draft")])
+            if self.active_selected(identifier):
+                rows.append([button("draft_selected")])
+            if not policy:
+                rows.append([button("auto")])
+            if len(self.agents) > 1:
+                rows.append([button("strategy_all")])
+            if owned:
+                rows.append([button("positions")])
+            rows.append([button("manage")])
+            options = self.active_options(identifier)
+            if options and command not in {"整理選定方案", "選方案 A", "選方案 B", "選方案 C"}:
+                rows = [[{"text": "方案 " + letter + "｜" + item["label"][:35],
+                          "callback_data": "c:" + token + ":" + options["nonce"] + ":" + letter}]
+                        for letter, item in options["items"].items()] + rows
         if pending and pending in reply:
             label = "確認套用全部策略" if self.store.get("pending_account") == "__all__" else "確認此提案"
             rows.insert(0, [{"text": label, "callback_data": self.callback_data(pending)}])
         rows.append([{"text": "返回帳號清單", "callback_data": "b:" + token}])
         return {"inline_keyboard": rows}
+
+    def active_options(self, identifier):
+        state = self.store.get("options:" + identifier)
+        return state if isinstance(state, dict) and state.get("expires", 0) > time.time() else None
+
+    def active_selected(self, identifier):
+        selected = self.store.get("selected_option:" + identifier)
+        options = self.active_options(identifier)
+        return selected if (options and isinstance(selected, dict) and
+                            selected.get("nonce") == options["nonce"] and
+                            selected.get("letter") in options["items"]) else None
+
+    def remember_options(self, identifier, reply):
+        # Only explicit, line-started AI comparison labels become selectable choices.
+        matches = list(re.finditer(r"(?m)^\s*(?:[-*]\s*)?方案\s*([ABC])\s*[：:]\s*(.+)$", reply))
+        if len(matches) < 2 or len({match.group(1) for match in matches}) != len(matches):
+            self.store.set("options:" + identifier, None)
+            self.store.set("selected_option:" + identifier, None)
+            return
+        items = {}
+        for index, match in enumerate(matches):
+            end = matches[index+1].start() if index+1 < len(matches) else len(reply)
+            excerpt = reply[match.start():end].strip().split("\n\n", 1)[0][:1200]
+            items[match.group(1)] = {"label": match.group(2).strip()[:80], "excerpt": excerpt}
+        self.store.set("options:" + identifier, {"nonce": uuid.uuid4().hex[:8],
+                                                 "expires": time.time()+1800, "items": items,
+                                                 "context": reply[:matches[0].start()].strip()[:1600]})
+        self.store.set("selected_option:" + identifier, None)
 
     @staticmethod
     def mapped_symbols(agent: Agent) -> tuple[dict[str, str], str]:
@@ -280,6 +364,52 @@ class AccountRouter:
         if message in {"策略", "/strategy"}:
             return "【" + self.account_label(identifier) + "】\n傳『策略 你的交易規則』建立待確認策略卡；例如『策略 用 SMC 只做空』。"
         agent = self.agents[identifier]
+        if message == "討論／修改策略":
+            return ("【" + self.account_label(identifier) + "】\n直接輸入想討論的交易想法，我會帶入這個帳號的策略與最近對話。"
+                    "要產生待確認草案，可傳『整理成草案 你的方案』或『修改：你的要求』；討論本身不會套用。")
+        if message in {"交易管理", "/manage"}:
+            return ("【" + self.account_label(identifier) + "】\n下方只列出此帳號目前適用的管理操作；"
+                    "暫停會立即停止新單；平倉、啟動和重設仍須確認。")
+        if message == "返回主選單":
+            return "【" + self.account_label(identifier) + "】\n已返回此帳號的主選單。"
+        choice_match = re.fullmatch(r"(?:選方案\s*)?([ABC])", message, re.IGNORECASE)
+        if choice_match:
+            letter = choice_match.group(1).upper()
+            options = self.active_options(identifier)
+            if not options or letter not in options["items"]:
+                return "【" + self.account_label(identifier) + "】\n目前沒有有效的方案 " + letter + "；請先討論並取得新選項。"
+            self.store.set("selected_option:" + identifier, {"nonce": options["nonce"], "letter": letter})
+            item = options["items"][letter]
+            return ("【" + self.account_label(identifier) + "】\n已選方案 " + letter + "｜" + item["label"] +
+                    "\n這仍是討論方案，沒有更改已確認策略。可繼續打字討論，或按『整理選定方案』產生待確認草案。")
+        if message == "整理選定方案":
+            selected = self.active_selected(identifier)
+            if not selected:
+                return "【" + self.account_label(identifier) + "】\n選定方案已過期；請先重新討論並選擇。"
+            options = self.active_options(identifier)
+            letter = selected["letter"]
+            excerpt = options["items"][letter]["excerpt"]
+            risk = re.findall(r"(\d+(?:\.\d+)?)\s*%", excerpt)
+            if len(set(risk)) > 1:
+                return "【" + self.account_label(identifier) + "】\n選定方案含多個風險百分比；請明確寫出要採用的單筆與總風險。"
+            if risk and not re.search(r"(?:每筆|單筆|單次交易|per.trade)[^\n。；]{0,40}" + re.escape(risk[0]) + r"\s*%", excerpt + "\n" + options["context"], re.I):
+                return "【" + self.account_label(identifier) + "】\n選定方案的 " + risk[0] + "% 未說明是單筆還是總風險；請明確補充。"
+            detail = ("採用剛才討論的方案 " + letter + "，僅採用該方案的條件，不採用其他比較方案。"
+                      "討論背景：" + options["context"] + "\n選定方案原文：" + excerpt)
+            if risk:
+                detail += "；選定方案的每筆風險為 " + risk[0] + "%"
+            try:
+                required = {tf.upper() for tf in re.findall(r"\b(?:M|H)\d+\b", excerpt, re.I)}
+                reply = agent.draft(detail, per_trade=float(risk[0]) if risk else None,
+                                    discussion_context=True, required_timeframes=required)
+            except ValueError as exc:
+                raise ValueError("帳號 " + self.account_label(identifier) + "：" + str(exc)) from None
+            pending = agent.store.get("pending", "")
+            if pending and pending in reply:
+                self.store.set("pending", pending)
+                self.store.set("pending_account", identifier)
+                self.store.set("selected_option:" + identifier, None)
+            return "【" + self.account_label(identifier) + "】\n" + reply
         try:
             reply = agent.handle(message)
         except ValueError as exc:
@@ -290,6 +420,11 @@ class AccountRouter:
             self.store.set("pending_account", identifier)
         else:
             self.store.set("pending", "")
+        latest = agent.store.recent(1)
+        if latest and latest[-1]["kind"] == "conversation":
+            event = latest[-1]["data"]
+            if event.get("question") == message:
+                self.remember_options(identifier, reply)
         return "【" + self.account_label(identifier) + "】\n" + reply
 
 
@@ -299,12 +434,11 @@ class MultiTelegram(Telegram):
             return
         commands = [
             ("start", "顯示帳號選單"), ("accounts", "選擇操作帳號"),
-            ("status", "查看目前帳號狀態"), ("positions", "查看持倉"),
-            ("why", "查看最近決策原因"), ("strategy", "查看策略輸入方式"),
+            ("status", "查看目前帳號狀態"), ("why", "查看最近決策原因"),
+            ("strategy", "查看策略輸入方式"),
             ("auto", "讓 AI 提出自選交易方法"),
             ("strategy_all", "全部帳號共用策略草案"),
-            ("pause", "暫停新單"), ("resume", "提出啟動交易"),
-            ("close", "提出平倉"), ("reset", "提出重設回撤"),
+            ("manage", "依帳號狀態顯示交易管理操作"),
             ("back", "返回帳號清單"),
         ]
         self.call("setMyCommands", {
