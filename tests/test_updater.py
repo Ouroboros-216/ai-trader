@@ -1,10 +1,12 @@
 import hashlib
 import io
 import zipfile
+from types import SimpleNamespace
 
 import pytest
 
 from aitrader.updater import _archive_files, install_stage, installed_ea_targets, latest_release, sync_bundled_ea, verified_stage, version_tuple
+import aitrader.setup_gui as setup_gui
 
 
 def package(entries):
@@ -85,3 +87,50 @@ def test_release_must_match_configured_public_repository(tmp_path):
     with pytest.raises(ValueError, match="倉庫不符"):
         latest_release(root, lambda *_: body)
     assert version_tuple("v0.8.4") > version_tuple("0.8.3")
+
+
+def test_update_window_stays_open_until_new_window_signals_ready(tmp_path):
+    window = object.__new__(setup_gui.SetupWindow)
+    events, statuses = [], []
+    window.root = SimpleNamespace(after=lambda delay, callback: events.append(callback),
+                                  destroy=lambda: events.append("destroyed"))
+    window.status = SimpleNamespace(set=statuses.append)
+    marker = tmp_path / "update-gui-ready-test"
+    process = SimpleNamespace(poll=lambda: None)
+    window._watch_update(process, marker)
+    assert len(events) == 1 and "destroyed" not in events
+    process.poll = lambda: 0
+    events.pop(0)()
+    assert "destroyed" not in events
+    marker.write_text("ready", encoding="ascii")
+    events.pop(0)()
+    assert events == ["destroyed"] and not marker.exists()
+
+
+def test_update_failure_keeps_setup_window_open(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup_gui, "ROOT", tmp_path)
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "runtime" / "update.log").write_text("更新失敗：下載校驗不符", encoding="utf-8")
+    window = object.__new__(setup_gui.SetupWindow)
+    statuses = []
+    window.root = SimpleNamespace(after=lambda *_: pytest.fail("failure must not reschedule"),
+                                  destroy=lambda: pytest.fail("failure must not close window"))
+    window.status = SimpleNamespace(set=statuses.append)
+    window._watch_update(SimpleNamespace(poll=lambda: 1), tmp_path / "runtime" / "update-gui-ready-test")
+    assert "下載校驗不符" in statuses[-1]
+
+
+def test_new_setup_window_writes_ready_signal_after_showing(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup_gui, "ROOT", tmp_path)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    marker = runtime / "update-gui-ready-test"
+    monkeypatch.setenv("AI_TRADER_GUI_READY_FILE", str(marker))
+    calls = []
+    window = object.__new__(setup_gui.SetupWindow)
+    window.root = SimpleNamespace(deiconify=lambda: calls.append("show"),
+                                  update_idletasks=lambda: calls.append("paint"),
+                                  mainloop=lambda: calls.append("loop"))
+    window.run()
+    assert calls == ["show", "paint", "loop"]
+    assert marker.read_text(encoding="ascii") == "ready"

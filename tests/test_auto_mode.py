@@ -60,6 +60,14 @@ def test_strategy_question_is_discussion_not_a_change(agent, policy):
     assert "不能說「手數不能設定」" in CHAT and "M15 說成 H15" in CHAT
 
 
+def test_chat_decodes_literal_line_breaks_only_in_answer(agent):
+    agent.provider.response = {"answer": "第一段\\n\\n第二段"}
+    reply = agent.handle("先討論，不要改策略")
+    assert reply == "第一段\n\n第二段"
+    saved = agent.conversation_history()[-1]
+    assert saved["assistant"] == reply
+
+
 def test_chat_remembers_discussion_and_explicit_request_creates_only_draft(agent, policy):
     agent.provider.response = {"answer": "可考慮 XAUUSD 剝頭皮，但先定義成本與失效。"}
     agent.handle("比較 XAUUSD 剝頭皮和原本結構策略")

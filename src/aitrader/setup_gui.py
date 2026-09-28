@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import tkinter as tk
 from contextlib import ExitStack
 from pathlib import Path
@@ -564,24 +565,58 @@ class SetupWindow:
                 return
             root = ROOT / "runtime"
             root.mkdir(exist_ok=True)
-            out = (root / "update.out.log").open("a", encoding="utf-8")
-            err = (root / "update.err.log").open("a", encoding="utf-8")
+            ready_marker = root / ("update-gui-ready-" + uuid.uuid4().hex)
+            environment = os.environ.copy()
+            environment["AI_TRADER_GUI_READY_FILE"] = str(ready_marker)
             try:
-                subprocess.Popen([sys.executable, "-m", "aitrader.updater", "apply", "--root", str(ROOT), "--tag", release["tag"]],
-                                 cwd=ROOT, stdout=out, stderr=err,
-                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            finally:
-                out.close()
-                err.close()
-            self.status.set("更新程序已啟動；完成後設定視窗會自動重新開啟。")
-            self.root.after(1000, self.root.destroy)
+                (root / "update.log").write_text("更新中：" + release["tag"] + "\n", encoding="utf-8")
+                with (root / "update.out.log").open("a", encoding="utf-8") as out, (root / "update.err.log").open("a", encoding="utf-8") as err:
+                    process = subprocess.Popen([sys.executable, "-m", "aitrader.updater", "apply", "--root", str(ROOT), "--tag", release["tag"]],
+                                               cwd=ROOT, stdout=out, stderr=err, env=environment,
+                                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            except OSError as exc:
+                self.status.set("無法啟動更新程序：" + type(exc).__name__ + "。設定視窗保持開啟。")
+                return
+            self.status.set("更新中；完成且新版視窗開啟後，這個視窗才會關閉。")
+            self.root.after(500, lambda: self._watch_update(process, ready_marker))
         self._run("GitHub 更新", lambda: latest_release(ROOT), done)
+
+    def _watch_update(self, process, ready_marker: Path, gui_deadline=None):
+        result = process.poll()
+        if result is None:
+            self.root.after(500, lambda: self._watch_update(process, ready_marker))
+            return
+        if result != 0:
+            log = ROOT / "runtime" / "update.log"
+            detail = log.read_text(encoding="utf-8").strip()[:250] if log.is_file() else "詳見 runtime/update.err.log"
+            self.status.set(detail + "；設定視窗仍可使用。")
+            ready_marker.unlink(missing_ok=True)
+            return
+        if ready_marker.is_file():
+            ready_marker.unlink(missing_ok=True)
+            self.root.destroy()
+            return
+        gui_deadline = gui_deadline or time.monotonic() + 15
+        if time.monotonic() >= gui_deadline:
+            self.status.set("更新程序已完成，但新版設定視窗未確認開啟；請查看 runtime/update.gui.err.log，或雙擊『開啟設定.cmd』。目前視窗保持開啟。")
+            ready_marker.unlink(missing_ok=True)
+            return
+        self.root.after(500, lambda: self._watch_update(process, ready_marker, gui_deadline))
 
     def open_guide(self):
         os.startfile(ROOT / "docs" / "SETUP.zh-TW.md")
 
     def run(self):
         self.root.deiconify()
+        marker = os.environ.pop("AI_TRADER_GUI_READY_FILE", "")
+        if marker:
+            path = Path(marker)
+            if path.name.startswith("update-gui-ready-") and path.resolve().parent == (ROOT / "runtime").resolve():
+                try:
+                    self.root.update_idletasks()
+                    path.write_text("ready", encoding="ascii")
+                except OSError:
+                    pass
         self.root.mainloop()
 
 

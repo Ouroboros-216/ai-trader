@@ -233,9 +233,18 @@ def apply_update(root: Path, expected_tag: str, read_url=_read_url) -> int:
         raise
     if was_running:
         _start_service(root)
-    subprocess.Popen([sys.executable.replace("python.exe", "pythonw.exe") if os.name == "nt" else sys.executable,
-                      "-m", "aitrader.setup_gui"], cwd=root,
-                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    gui_out = (root / "runtime" / "update.gui.out.log").open("a", encoding="utf-8")
+    gui_err = (root / "runtime" / "update.gui.err.log").open("a", encoding="utf-8")
+    try:
+        gui = subprocess.Popen([sys.executable.replace("python.exe", "pythonw.exe") if os.name == "nt" else sys.executable,
+                                "-m", "aitrader.setup_gui"], cwd=root, stdout=gui_out, stderr=gui_err,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    finally:
+        gui_out.close()
+        gui_err.close()
+    time.sleep(0.5)
+    if gui.poll() is not None:
+        raise RuntimeError("新版設定視窗啟動失敗；請查看 runtime/update.gui.err.log")
     return ea_count
 
 

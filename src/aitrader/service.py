@@ -596,6 +596,8 @@ class Agent:
                                              "policy": self.store.get("policy"), "pending_policy": pending_policy,
                                              "conversation_history": self.conversation_history()})
         reply = str(answer.get("answer", "沒有可用回答"))[:10000]
+        # Some JSON-mode models double-escape line breaks inside the answer string.
+        reply = reply.replace("\\r\\n", "\n").replace("\\n", "\n")
         if pending_id and self.pending_policy()[0] == pending_id:
             reply += "\n\n草案尚未套用；確認 " + pending_id
         self.store.event("conversation", {"question": message, "answer": reply})
